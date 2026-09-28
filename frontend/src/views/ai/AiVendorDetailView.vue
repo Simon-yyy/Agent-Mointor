@@ -179,8 +179,8 @@ onMounted(() => {
                 {{ item.title }} ↗
               </a>
             </h4>
-            <p class="update-summary-zh" v-if="item.summaryZh && item.summaryZh.trim()">
-              {{ item.summaryZh }}
+            <p class="update-summary-zh">
+              {{ (item.summaryZh && item.summaryZh.trim()) ? item.summaryZh : '官方摘要整理中，详情以原厂公告原文为准。' }}
             </p>
             <div class="update-footer">
               <span class="vendor-tag font-mono">来源: {{ vendor.name }}</span>

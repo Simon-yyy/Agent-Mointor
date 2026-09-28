@@ -21,3 +21,10 @@ Thumbs.db
 # 临时文件
 *.zip
 *.log
+
+# 历史遗留文件持久化数据
+data/
+
+# 前端构建同步至后端的静态资源（由 npm run build 产生，不应进源码版本库）
+backend/src/main/resources/static/assets/
+backend/src/main/resources/static/index.html

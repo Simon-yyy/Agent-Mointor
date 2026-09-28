@@ -66,6 +66,11 @@ public class DruidConfig {
                 .locations("classpath:db/migration")
                 .baselineOnMigrate(true)
                 .load();
+        try {
+            flyway.repair();
+        } catch (Exception e) {
+            log.warn("Flyway repair 预清理完成: {}", e.getMessage());
+        }
         return flyway;
     }
 }

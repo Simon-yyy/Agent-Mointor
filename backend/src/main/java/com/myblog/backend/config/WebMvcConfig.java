@@ -37,12 +37,17 @@ public class WebMvcConfig implements WebMvcConfigurer {
     public void addInterceptors(InterceptorRegistry registry) {
         registry.addInterceptor(authInterceptor)
                 .addPathPatterns("/api/admin/**")
-                .excludePathPatterns("/api/auth/**", "/api/hello");
+                .excludePathPatterns("/api/auth/**");
     }
 
     @Override
     public void addResourceHandlers(ResourceHandlerRegistry registry) {
-        // 支持 SPA 前端合体部署与 History 模式刷新自动 fallback 至 index.html，同时禁用浏览器本地强缓存
+        // 1. 内容哈希命名的前端构建资源（/assets/**）配置 1 年强缓存，加速首屏加载并节省服务器带宽
+        registry.addResourceHandler("/assets/**")
+                .addResourceLocations("classpath:/static/assets/")
+                .setCacheControl(org.springframework.http.CacheControl.maxAge(365, java.util.concurrent.TimeUnit.DAYS).cachePublic());
+
+        // 2. SPA 入口 index.html 及其他根资源保持 no-cache，保证发版即时生效，并提供 History 模式 fallback
         registry.addResourceHandler("/**")
                 .addResourceLocations("classpath:/static/")
                 .setCacheControl(org.springframework.http.CacheControl.noCache().noStore().mustRevalidate())
@@ -61,5 +66,20 @@ public class WebMvcConfig implements WebMvcConfigurer {
                         return null;
                     }
                 });
+    }
+
+    @Override
+    public void extendMessageConverters(java.util.List<org.springframework.http.converter.HttpMessageConverter<?>> converters) {
+        for (org.springframework.http.converter.HttpMessageConverter<?> converter : converters) {
+            if (converter instanceof org.springframework.http.converter.json.MappingJackson2HttpMessageConverter jacksonConverter) {
+                jacksonConverter.setDefaultCharset(java.nio.charset.StandardCharsets.UTF_8);
+                java.util.List<org.springframework.http.MediaType> mediaTypes = new java.util.ArrayList<>(jacksonConverter.getSupportedMediaTypes());
+                org.springframework.http.MediaType utf8Json = new org.springframework.http.MediaType("application", "json", java.nio.charset.StandardCharsets.UTF_8);
+                if (!mediaTypes.contains(utf8Json)) {
+                    mediaTypes.add(0, utf8Json);
+                }
+                jacksonConverter.setSupportedMediaTypes(mediaTypes);
+            }
+        }
     }
 }

@@ -21,10 +21,14 @@ public class AiModelController {
 
     private final AiModelService aiModelService;
     private final com.myblog.backend.aimodel.service.AiModelCrawlService aiModelCrawlService;
+    private final com.myblog.backend.aimodel.service.ModelBenchmarkService benchmarkService;
 
-    public AiModelController(AiModelService aiModelService, com.myblog.backend.aimodel.service.AiModelCrawlService aiModelCrawlService) {
+    public AiModelController(AiModelService aiModelService,
+                              com.myblog.backend.aimodel.service.AiModelCrawlService aiModelCrawlService,
+                              com.myblog.backend.aimodel.service.ModelBenchmarkService benchmarkService) {
         this.aiModelService = aiModelService;
         this.aiModelCrawlService = aiModelCrawlService;
+        this.benchmarkService = benchmarkService;
     }
 
     /**
@@ -36,7 +40,7 @@ public class AiModelController {
     }
 
     /**
-     * 1. 分页检索模型动态事件流 (带关键词、厂商、模态、类型筛选)
+     * 1. 分页检索模型动态事件流 (带关键词、厂商、模态、类型、9大标准分类筛选)
      */
     @GetMapping("/events")
     public Result<PageResult<ModelEvent>> getEvents(
@@ -44,9 +48,10 @@ public class AiModelController {
             @RequestParam(required = false) String vendor,
             @RequestParam(required = false) String modality,
             @RequestParam(required = false) String type,
+            @RequestParam(required = false) String category,
             @RequestParam(defaultValue = "1") int page,
             @RequestParam(defaultValue = "12") int size) {
-        return Result.success(aiModelService.getEvents(keyword, vendor, modality, type, page, size));
+        return Result.success(aiModelService.getEvents(keyword, vendor, modality, type, category, page, size));
     }
 
     /**
@@ -66,12 +71,25 @@ public class AiModelController {
     }
 
     /**
-     * 4. 查询 AI 模型目录
+     * 4. 查询 AI 模型目录 (支持服务端多维分页检索、国内/国外与多模态组合筛选, CODE_REVIEW 追加 15)
      */
     @GetMapping("/models")
-    public Result<List<AiModel>> getModels(
+    public Result<?> getModels(
             @RequestParam(required = false) Long vendorId,
-            @RequestParam(required = false) String series) {
+            @RequestParam(required = false) String series,
+            @RequestParam(required = false) String keyword,
+            @RequestParam(required = false) String modality,
+            @RequestParam(required = false) String availability,
+            @RequestParam(required = false) String region,
+            @RequestParam(required = false) String sort,
+            @RequestParam(required = false) Integer page,
+            @RequestParam(required = false) Integer size) {
+        if (page != null && size != null) {
+            return Result.success(aiModelService.getPagedModels(vendorId, series, keyword, modality, availability, region, sort, page, size));
+        }
+        if (keyword != null || modality != null || availability != null || region != null || sort != null) {
+            return Result.success(aiModelService.getPagedModels(vendorId, series, keyword, modality, availability, region, sort, 1, 1000).getList());
+        }
         return Result.success(aiModelService.getModels(vendorId, series));
     }
 
@@ -129,6 +147,25 @@ public class AiModelController {
             @RequestParam(defaultValue = "2026") String year,
             @RequestParam(required = false) Long vendorId) {
         return Result.success(aiModelService.getCoverageAudits(year, vendorId));
+    }
+
+    /**
+     * 10. 公开查询大模型全网评测天梯榜 (方案阶段 4: 支持按 arena_elo, swe_bench, math_500, mmlu_pro 排序)
+     */
+    @GetMapping("/benchmarks/leaderboard")
+    public Result<List<com.myblog.backend.aimodel.model.ModelBenchmark>> getLeaderboard(
+            @RequestParam(defaultValue = "EPOCH_AI") String suite,
+            @RequestParam(defaultValue = "arena_elo") String sortBy,
+            @RequestParam(defaultValue = "20") int limit) {
+        return Result.success(benchmarkService.getLeaderboard(suite, sortBy, limit));
+    }
+
+    /**
+     * 11. 公开查询指定模型的所有评测雷达数据
+     */
+    @GetMapping("/models/{id}/benchmarks")
+    public Result<List<com.myblog.backend.aimodel.model.ModelBenchmark>> getModelBenchmarks(@PathVariable Long id) {
+        return Result.success(benchmarkService.getBenchmarksByModelId(id));
     }
 
 }

@@ -14,10 +14,27 @@ public class AiModel {
     private String availabilityStatus;
     private String createdAt;
 
+    // 真实客观规格字段 (Flyway V18)
+    private String summaryZh;
+    private String officialReleaseDate;
+    private String contextWindow;
+    private String parameterSize;
+    private String license;
+    private String modelCardUrl;
+
     // 关联显示
     private String vendorName;
     private String vendorSlug;
     private String brandColor;
+    private String vendorRegion;
+
+    // 管线契约与血缘 (Flyway V23)
+    private String releaseDatePrecision;
+    private String factsProvenance;
+    private java.math.BigDecimal pricingInputPerM;
+    private java.math.BigDecimal pricingOutputPerM;
+    private java.math.BigDecimal pricingCachedPerM;
+    private String catalogStatus;
 
     public AiModel() {}
 
@@ -61,6 +78,24 @@ public class AiModel {
     public String getCreatedAt() { return createdAt; }
     public void setCreatedAt(String createdAt) { this.createdAt = createdAt; }
 
+    public String getSummaryZh() { return summaryZh; }
+    public void setSummaryZh(String summaryZh) { this.summaryZh = summaryZh; }
+
+    public String getOfficialReleaseDate() { return officialReleaseDate; }
+    public void setOfficialReleaseDate(String officialReleaseDate) { this.officialReleaseDate = officialReleaseDate; }
+
+    public String getContextWindow() { return contextWindow; }
+    public void setContextWindow(String contextWindow) { this.contextWindow = contextWindow; }
+
+    public String getParameterSize() { return parameterSize; }
+    public void setParameterSize(String parameterSize) { this.parameterSize = parameterSize; }
+
+    public String getLicense() { return license; }
+    public void setLicense(String license) { this.license = license; }
+
+    public String getModelCardUrl() { return modelCardUrl; }
+    public void setModelCardUrl(String modelCardUrl) { this.modelCardUrl = modelCardUrl; }
+
     public String getVendorName() { return vendorName; }
     public void setVendorName(String vendorName) { this.vendorName = vendorName; }
 
@@ -69,4 +104,25 @@ public class AiModel {
 
     public String getBrandColor() { return brandColor; }
     public void setBrandColor(String brandColor) { this.brandColor = brandColor; }
+
+    public String getVendorRegion() { return vendorRegion; }
+    public void setVendorRegion(String vendorRegion) { this.vendorRegion = vendorRegion; }
+
+    public String getReleaseDatePrecision() { return releaseDatePrecision; }
+    public void setReleaseDatePrecision(String releaseDatePrecision) { this.releaseDatePrecision = releaseDatePrecision; }
+
+    public String getFactsProvenance() { return factsProvenance; }
+    public void setFactsProvenance(String factsProvenance) { this.factsProvenance = factsProvenance; }
+
+    public java.math.BigDecimal getPricingInputPerM() { return pricingInputPerM; }
+    public void setPricingInputPerM(java.math.BigDecimal pricingInputPerM) { this.pricingInputPerM = pricingInputPerM; }
+
+    public java.math.BigDecimal getPricingOutputPerM() { return pricingOutputPerM; }
+    public void setPricingOutputPerM(java.math.BigDecimal pricingOutputPerM) { this.pricingOutputPerM = pricingOutputPerM; }
+
+    public java.math.BigDecimal getPricingCachedPerM() { return pricingCachedPerM; }
+    public void setPricingCachedPerM(java.math.BigDecimal pricingCachedPerM) { this.pricingCachedPerM = pricingCachedPerM; }
+
+    public String getCatalogStatus() { return catalogStatus; }
+    public void setCatalogStatus(String catalogStatus) { this.catalogStatus = catalogStatus; }
 }

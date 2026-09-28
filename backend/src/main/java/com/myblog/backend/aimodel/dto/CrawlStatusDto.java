@@ -16,8 +16,12 @@ public class CrawlStatusDto {
     private Integer slaLatencyP95Minutes;
     private java.util.Map<String, Integer> capabilityCounts;
     private java.util.List<java.util.Map<String, Object>> recentActiveVendors;
+    private Integer verifiedModelReleases; // 追加 26: 带证据 + 首发类 + 模型关联有效的已核实发布数
 
     public CrawlStatusDto() {}
+
+    public Integer getVerifiedModelReleases() { return verifiedModelReleases; }
+    public void setVerifiedModelReleases(Integer verifiedModelReleases) { this.verifiedModelReleases = verifiedModelReleases; }
 
     public CrawlStatusDto(String lastCheckTime, Integer totalVendors, Integer activeSources,
                           Integer abnormalSources, Integer totalEvents, Integer totalModels) {

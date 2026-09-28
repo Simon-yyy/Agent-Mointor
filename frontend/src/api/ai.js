@@ -5,7 +5,7 @@ import { request } from './request.js'
  */
 export const aiApi = {
   /**
-   * 分页检索事件流
+   * 分页检索事件流 (支持9大分类筛选)
    */
   getEvents(params = {}) {
     const searchParams = new URLSearchParams()
@@ -13,11 +13,31 @@ export const aiApi = {
     if (params.vendor) searchParams.append('vendor', params.vendor)
     if (params.modality) searchParams.append('modality', params.modality)
     if (params.type) searchParams.append('type', params.type)
+    if (params.category) searchParams.append('category', params.category)
     if (params.page) searchParams.append('page', params.page)
     if (params.size) searchParams.append('size', params.size)
 
     const query = searchParams.toString()
     return request(`/api/model-updates/events${query ? '?' + query : ''}`)
+  },
+
+  /**
+   * 获取模型基准评测天梯榜 (方案阶段 4 & 5)
+   */
+  getLeaderboard(params = {}) {
+    const searchParams = new URLSearchParams()
+    if (params.suite) searchParams.append('suite', params.suite)
+    if (params.sortBy) searchParams.append('sortBy', params.sortBy)
+    if (params.limit) searchParams.append('limit', params.limit)
+    const query = searchParams.toString()
+    return request(`/api/model-updates/benchmarks/leaderboard${query ? '?' + query : ''}`)
+  },
+
+  /**
+   * 获取指定模型的全维评测雷达数据
+   */
+  getModelBenchmarks(id) {
+    return request(`/api/model-updates/models/${id}/benchmarks`)
   },
 
   /**
@@ -35,12 +55,19 @@ export const aiApi = {
   },
 
   /**
-   * 获取模型目录
+   * 获取模型目录 (支持服务端多维分页与历史全量模式)
    */
   getModels(params = {}) {
     const searchParams = new URLSearchParams()
     if (params.vendorId) searchParams.append('vendorId', params.vendorId)
     if (params.series) searchParams.append('series', params.series)
+    if (params.keyword) searchParams.append('keyword', params.keyword)
+    if (params.modality) searchParams.append('modality', params.modality)
+    if (params.availability) searchParams.append('availability', params.availability)
+    if (params.region) searchParams.append('region', params.region)
+    if (params.sort) searchParams.append('sort', params.sort)
+    if (params.page) searchParams.append('page', params.page)
+    if (params.size) searchParams.append('size', params.size)
     const query = searchParams.toString()
     return request(`/api/model-updates/models${query ? '?' + query : ''}`)
   },
@@ -176,5 +203,46 @@ export const aiApi = {
     if (params.vendorId) searchParams.append('vendorId', params.vendorId)
     const query = searchParams.toString()
     return request(`/api/model-updates/coverage${query ? '?' + query : ''}`)
+  },
+
+  // ========== 目录聚合同步 (管理端) ==========
+
+  /**
+   * 目录计数口径报告 (追加 16/17): 端点行/规范模型/待审/厂商分层/重复实体/静态资源页分列
+   */
+  getCatalogReport() {
+    return request('/api/admin/model-updates/catalog/report')
+  },
+
+  /**
+   * 目录同步运行审计列表 (含 SyncReport JSON)
+   */
+  getCatalogRuns(limit = 20) {
+    return request(`/api/admin/model-updates/catalog/runs?limit=${limit}`)
+  },
+
+  /**
+   * 手动触发目录同步 (sourceKey: models_dev / epoch_ai_benchmark / all)
+   */
+  triggerCatalogSync(sourceKey = 'all') {
+    return request(`/api/admin/model-updates/catalog/sync/${encodeURIComponent(sourceKey)}`, {
+      method: 'POST'
+    })
+  },
+
+  /**
+   * 目录字段冲突待审队列
+   */
+  getCatalogConflicts(status = 'PENDING', limit = 50) {
+    return request(`/api/admin/model-updates/catalog/conflicts?status=${status}&limit=${limit}`)
+  },
+
+  /**
+   * 处置目录字段冲突 (KEEP 保留现值 / TAKE 采纳上游)
+   */
+  resolveCatalogConflict(id, decision = 'KEEP') {
+    return request(`/api/admin/model-updates/catalog/conflicts/${id}/resolve?decision=${decision}`, {
+      method: 'POST'
+    })
   },
 }

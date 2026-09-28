@@ -2,6 +2,14 @@
 import { ref, onMounted, computed, watch } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { aiApi } from '../../api/ai.js'
+import {
+  normalizeElo,
+  normalizePercent,
+  calculateModelTier,
+  getModelTierName,
+  getCategoryBadge,
+  CATEGORY_CONFIGS
+} from '../../utils/scale.js'
 
 const router = useRouter()
 const route = useRoute()
@@ -19,11 +27,23 @@ const crawling = ref(false)
 const vendors = ref([])
 const status = ref(null)
 
+// 方案阶段 4: 前沿评测天梯榜状态
+const benchmarkLeaderboard = ref([])
+const benchmarkLoading = ref(false)
+const benchmarkSortBy = ref('arena_elo')
+const benchmarkTabs = [
+  { key: 'arena_elo', label: 'Arena 竞技场', unit: 'ELO' },
+  { key: 'swe_bench', label: 'SWE-bench 代码', unit: '%' },
+  { key: 'math_500', label: 'MATH-500 数学', unit: '%' },
+  { key: 'mmlu_pro', label: 'MMLU-Pro 知识', unit: '%' },
+]
+
 // 搜索与筛选状态（支持 URL 同步）
 const keyword = ref(route.query.keyword || '')
 const selectedVendor = ref(route.query.vendor || '')
 const selectedModality = ref(route.query.modality || '')
 const selectedType = ref(route.query.type || '')
+const selectedCategory = ref(route.query.category || '')
 
 const eventTypes = [
   { key: '', label: '全部事件' },
@@ -43,7 +63,7 @@ const capabilityList = computed(() => {
       en: 'Text & Reasoning',
       icon: '🧠',
       modality: '文本',
-      count: counts.textReasoning || 12,
+      count: counts.textReasoning != null ? counts.textReasoning : '—',
       desc: '长上下文逻辑推导、数学证明与深度推理模型',
     },
     {
@@ -52,7 +72,7 @@ const capabilityList = computed(() => {
       en: 'Code & Engineering',
       icon: '⚡',
       modality: '代码',
-      count: counts.code || 8,
+      count: counts.code != null ? counts.code : '—',
       desc: '专精代码生成、补全、Debug 与全栈软件工程',
     },
     {
@@ -61,7 +81,7 @@ const capabilityList = computed(() => {
       en: 'Vision & Multimodal',
       icon: '👁️',
       modality: '视觉',
-      count: counts.vision || 5,
+      count: counts.vision != null ? counts.vision : '—',
       desc: '图文问答、视觉感知与原生跨模态输入输出',
     },
     {
@@ -70,7 +90,7 @@ const capabilityList = computed(() => {
       en: 'Speech & Real-time',
       icon: '🎙️',
       modality: '语音',
-      count: counts.audio || 2,
+      count: counts.audio != null ? counts.audio : '—',
       desc: '全双工低延时语音交互与端到端音频生成',
     },
   ]
@@ -145,6 +165,7 @@ async function loadEvents() {
       vendor: selectedVendor.value,
       modality: selectedModality.value,
       type: selectedType.value,
+      category: selectedCategory.value,
       page: page.value,
       size: size.value,
     })
@@ -156,6 +177,38 @@ async function loadEvents() {
   } finally {
     loading.value = false
   }
+}
+
+// 方案阶段 4: 加载基准评测天梯榜
+async function loadLeaderboard() {
+  benchmarkLoading.value = true
+  try {
+    const res = await aiApi.getLeaderboard({ suite: 'EPOCH_AI', sortBy: benchmarkSortBy.value, limit: 6 })
+    benchmarkLeaderboard.value = res || []
+  } catch (e) {
+    console.error('加载评测天梯失败', e)
+  } finally {
+    benchmarkLoading.value = false
+  }
+}
+
+function switchBenchmarkSort(key) {
+  benchmarkSortBy.value = key
+  loadLeaderboard()
+}
+
+function getBenchmarkScore(item) {
+  if (!item) return null
+  if (benchmarkSortBy.value === 'arena_elo') return item.arenaElo
+  if (benchmarkSortBy.value === 'swe_bench') return item.sweBenchVerified
+  if (benchmarkSortBy.value === 'math_500') return item.math500
+  if (benchmarkSortBy.value === 'mmlu_pro') return item.mmluPro
+  return item.arenaElo
+}
+
+function selectCategory(cat) {
+  selectedCategory.value = selectedCategory.value === cat ? '' : cat
+  applyFilter()
 }
 
 // 默认主视图：官方最新动态主信息流 (official_leads) vs 已核实模型发布 (confirmed)
@@ -219,6 +272,21 @@ function filterLeadCategory(cat) {
   loadOfficialUpdates()
 }
 
+const expandAllVendors = ref(false)
+const displayedVendors = computed(() => {
+  if (expandAllVendors.value) {
+    return vendors.value
+  }
+  return vendors.value.slice(0, 9)
+})
+
+function filterLeadVendor(slug) {
+  selectedVendor.value = selectedVendor.value === slug ? '' : slug
+  leadPage.value = 1
+  page.value = 1
+  applyFilter()
+}
+
 function filterLeadMonth(m) {
   selectedLeadMonth.value = selectedLeadMonth.value === m ? '' : m
   leadPage.value = 1
@@ -242,6 +310,11 @@ function selectModality(mod) {
   if (el) el.scrollIntoView({ behavior: 'smooth' })
 }
 
+// 能力卡跳转: 数字是公开目录的模型数, 点击进入目录同一筛选 (追加 26 修复交互错位)
+function goCapabilityCatalog(mod) {
+  router.push({ path: '/models', query: { modality: mod } })
+}
+
 function selectVendor(v) {
   selectedVendor.value = selectedVendor.value === v ? '' : v
   applyFilter()
@@ -257,6 +330,7 @@ function resetFilters() {
   selectedVendor.value = ''
   selectedModality.value = ''
   selectedType.value = ''
+  selectedCategory.value = ''
   selectedLeadMonth.value = ''
   selectedLeadCategory.value = ''
   applyFilter()
@@ -268,6 +342,7 @@ function syncUrl() {
   if (selectedVendor.value) query.vendor = selectedVendor.value
   if (selectedModality.value) query.modality = selectedModality.value
   if (selectedType.value) query.type = selectedType.value
+  if (selectedCategory.value) query.category = selectedCategory.value
   router.replace({ query })
 }
 
@@ -295,6 +370,7 @@ onMounted(() => {
   loadStatusAndVendors()
   loadEvents()
   loadOfficialUpdates()
+  loadLeaderboard()
 })
 </script>
 
@@ -325,7 +401,7 @@ onMounted(() => {
           </p>
           <div class="obs-quick-links">
             <router-link to="/models" class="obs-link-btn primary">
-              浏览模型目录 ({{ status?.totalModels || 12 }}) →
+              浏览模型目录 ({{ status?.totalModels != null ? status.totalModels : '—' }}) →
             </router-link>
             <router-link to="/model-timeline" class="obs-link-btn secondary">
               演进时间线
@@ -399,26 +475,26 @@ onMounted(() => {
     <div class="obs-status-strip">
       <div class="strip-item">
         <span class="strip-label">收录厂商</span>
-        <span class="strip-val">{{ status?.totalVendors || 20 }}</span>
+        <span class="strip-val">{{ status?.totalVendors != null ? status.totalVendors : '—' }}</span>
       </div>
       <div class="strip-divider">·</div>
       <div class="strip-item">
         <span class="strip-label">启用官方来源</span>
-        <span class="strip-val highlight">{{ status?.activeSources || 8 }}</span>
+        <span class="strip-val highlight">{{ status?.activeSources != null ? status.activeSources : '—' }}</span>
       </div>
       <div class="strip-divider">·</div>
       <div class="strip-item">
         <span class="strip-label">已核实发布</span>
-        <span class="strip-val">{{ status?.totalEvents || total }}</span>
+        <span class="strip-val">{{ status?.verifiedModelReleases != null ? status.verifiedModelReleases : '—' }}</span>
       </div>
       <div class="strip-divider">·</div>
       <div class="strip-item">
-        <span class="strip-label">最近确认发布</span>
-        <span class="strip-val highlight-amber">{{ status?.latestConfirmedRelease || '2026-03-16' }}</span>
+        <span class="strip-label">最近模型首发</span>
+        <span class="strip-val highlight-amber">{{ status?.latestConfirmedRelease || '—' }}</span>
       </div>
       <div class="strip-divider">·</div>
       <div class="strip-item">
-        <span class="strip-label">最近成功检查</span>
+        <span class="strip-label">最近巡检完成</span>
         <span class="strip-val time">{{ status?.lastCheckTime || '尚未检查' }}</span>
       </div>
     </div>
@@ -483,7 +559,7 @@ onMounted(() => {
     <section class="obs-capability-section">
       <div class="section-title-row">
         <h3 class="section-caption">按核心能力探索</h3>
-        <span class="section-subnote">基于真实架构能力分类筛选收录模型</span>
+        <span class="section-subnote">按已收录能力标签浏览公开目录 · 点击进入对应模型列表</span>
       </div>
 
       <div class="capability-cards-grid">
@@ -491,8 +567,7 @@ onMounted(() => {
           v-for="cap in capabilityList"
           :key="cap.id"
           class="capability-card"
-          :class="{ active: selectedModality === cap.modality }"
-          @click="selectModality(cap.modality)"
+          @click="goCapabilityCatalog(cap.modality)"
         >
           <div class="cap-icon-box">{{ cap.icon }}</div>
           <div class="cap-info">
@@ -506,7 +581,7 @@ onMounted(() => {
       </div>
     </section>
 
-    <!-- 锚点用于能力卡点击后平滑滚动 -->
+    <!-- 能力卡跳转模型目录, 数字与目录筛选结果同口径 (追加 26) -->
     <div id="event-stream-anchor"></div>
 
     <!-- ====================================================
@@ -598,6 +673,35 @@ onMounted(() => {
             </button>
           </div>
 
+          <!-- 厂商分类胶囊条 (按厂商筛选动态) -->
+          <div class="leads-vendor-strip">
+            <span class="strip-label">按厂商：</span>
+            <button
+              class="lead-vendor-pill"
+              :class="{ active: !selectedVendor }"
+              @click="filterLeadVendor('')"
+            >
+              全部厂商
+            </button>
+            <button
+              v-for="v in displayedVendors"
+              :key="v.id"
+              class="lead-vendor-pill"
+              :class="{ active: selectedVendor === v.slug || selectedVendor === v.name }"
+              @click="filterLeadVendor(v.slug)"
+            >
+              <span class="v-pill-dot" :style="{ backgroundColor: v.brandColor || '#087D82' }"></span>
+              {{ v.name }}
+            </button>
+            <button
+              v-if="vendors.length > 9"
+              class="vendor-expand-toggle-btn"
+              @click="expandAllVendors = !expandAllVendors"
+            >
+              {{ expandAllVendors ? '收起 ▴' : `更多厂商 (${vendors.length - 9}) ▾` }}
+            </button>
+          </div>
+
           <!-- 月份筛选胶囊条 -->
           <div class="leads-month-strip">
             <span class="strip-label">月份观测：</span>
@@ -657,14 +761,14 @@ onMounted(() => {
                 </a>
               </h4>
 
-              <!-- 中文核心事实简介 (仅在具备高质量中文事实提炼时展示，拒绝套话占位) -->
-              <p class="lead-summary-zh" v-if="lead.summaryZh && lead.summaryZh.trim()">
-                {{ lead.summaryZh }}
+              <!-- 中文核心事实简介 (空摘要与 V20 模板句一律按"暂无摘要"呈现, 不冒充已核实说明) -->
+              <p class="lead-summary-zh" :class="{ 'summary-placeholder': !lead.summaryZh || lead.summaryZh === '暂无摘要' }">
+                {{ (lead.summaryZh && lead.summaryZh.trim() && lead.summaryZh !== '暂无摘要') ? lead.summaryZh : '暂无摘要 · 详情以官方原文为准' }}
               </p>
 
               <div class="lead-meta">
-                <span class="meta-item" :class="{ 'date-unverified': !lead.publishedAt }">
-                  📅 {{ lead.publishedAt ? `官方发布: ${lead.publishedAt}` : '日期待核实' }}
+                <span class="meta-item" :class="{ 'date-unverified': !lead.publishedAt || lead.dateUncertain }">
+                  📅 {{ lead.publishedAt && !lead.dateUncertain ? `官方发布: ${lead.publishedAt}` : '日期待核实' }}
                 </span>
                 <span class="meta-sep">·</span>
                 <span class="meta-item">
@@ -700,6 +804,57 @@ onMounted(() => {
 
         <!-- 视图 2: 已核实正式发布流 (深度结构化事实) -->
         <template v-else>
+          <!-- 方案阶段 7: 9大前沿主题多选胶囊条 -->
+          <div class="leads-month-strip confirmed-cat-strip">
+            <span class="strip-label">前沿维度：</span>
+            <button
+              class="lead-month-pill"
+              :class="{ active: selectedCategory === '' }"
+              @click="selectCategory('')"
+            >
+              全部维度
+            </button>
+            <button
+              v-for="(cfg, catKey) in CATEGORY_CONFIGS"
+              :key="catKey"
+              class="lead-month-pill"
+              :class="{ active: selectedCategory === catKey }"
+              :style="selectedCategory === catKey ? { borderColor: cfg.color, color: cfg.color, fontWeight: 'bold' } : {}"
+              @click="selectCategory(catKey)"
+            >
+              {{ cfg.label }}
+            </button>
+          </div>
+
+          <!-- 厂商分类胶囊条 (已核实事件按厂商筛选) -->
+          <div class="leads-vendor-strip">
+            <span class="strip-label">按厂商：</span>
+            <button
+              class="lead-vendor-pill"
+              :class="{ active: !selectedVendor }"
+              @click="filterLeadVendor('')"
+            >
+              全部厂商
+            </button>
+            <button
+              v-for="v in displayedVendors"
+              :key="v.id"
+              class="lead-vendor-pill"
+              :class="{ active: selectedVendor === v.slug || selectedVendor === v.name }"
+              @click="filterLeadVendor(v.slug)"
+            >
+              <span class="v-pill-dot" :style="{ backgroundColor: v.brandColor || '#087D82' }"></span>
+              {{ v.name }}
+            </button>
+            <button
+              v-if="vendors.length > 9"
+              class="vendor-expand-toggle-btn"
+              @click="expandAllVendors = !expandAllVendors"
+            >
+              {{ expandAllVendors ? '收起 ▴' : `更多厂商 (${vendors.length - 9}) ▾` }}
+            </button>
+          </div>
+
           <!-- 加载中状态 -->
           <div v-if="loading" class="stream-loading-state">
             <div class="loading-spinner-bar"></div>
@@ -738,6 +893,17 @@ onMounted(() => {
                     <div class="item-vendor-box">
                       <span class="vendor-dot-sm" :style="{ backgroundColor: item.brandColor || 'var(--obs-primary)' }"></span>
                       <span class="vendor-txt">{{ item.vendorName }}</span>
+                      <!-- 方案阶段 7: 9大分类Badge -->
+                      <span
+                        v-if="item.category"
+                        class="item-cat-tag"
+                        :style="{
+                          color: getCategoryBadge(item.category).color,
+                          backgroundColor: getCategoryBadge(item.category).bg
+                        }"
+                      >
+                        {{ getCategoryBadge(item.category).label }}
+                      </span>
                     </div>
                     <span
                       class="event-type-tag sm"
@@ -762,18 +928,41 @@ onMounted(() => {
                       >
                         #{{ m }}
                       </span>
+                      <!-- 方案阶段 7: 学术论文直达药丸角标 -->
+                      <a
+                        v-if="item.arxivId"
+                        :href="item.paperUrl || `https://arxiv.org/abs/${item.arxivId}`"
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        class="arxiv-pill-tag"
+                        @click.stop
+                      >
+                        📄 arXiv:{{ item.arxivId }} ↗
+                      </a>
                     </div>
 
-                    <a
-                      v-if="item.evidences && item.evidences.length > 0"
-                      :href="item.evidences[0].officialUrl"
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      class="official-proof-link"
-                      @click.stop
-                    >
-                      <span>🔗 {{ item.evidences[0].title || '官方凭据' }} ↗</span>
-                    </a>
+                    <div class="item-links-group">
+                      <a
+                        v-if="item.technicalReportUrl"
+                        :href="item.technicalReportUrl"
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        class="official-proof-link report"
+                        @click.stop
+                      >
+                        <span>📑 报告 ↗</span>
+                      </a>
+                      <a
+                        v-if="item.evidences && item.evidences.length > 0"
+                        :href="item.evidences[0].officialUrl"
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        class="official-proof-link"
+                        @click.stop
+                      >
+                        <span>🔗 {{ item.evidences[0].title || '官方凭据' }} ↗</span>
+                      </a>
+                    </div>
                   </div>
                 </article>
               </div>
@@ -816,26 +1005,109 @@ onMounted(() => {
 
           <div class="stat-mini-grid">
             <div class="stat-mini-item">
-              <span class="stat-mini-num">{{ status?.totalVendors || 20 }}</span>
+              <span class="stat-mini-num">{{ status?.totalVendors != null ? status.totalVendors : '—' }}</span>
               <span class="stat-mini-lbl">监控厂商 (100%)</span>
             </div>
             <div class="stat-mini-item">
-              <span class="stat-mini-num">{{ status?.activeSources || 23 }}</span>
+              <span class="stat-mini-num">{{ status?.activeSources != null ? status.activeSources : '—' }}</span>
               <span class="stat-mini-lbl">原厂信源</span>
             </div>
             <div class="stat-mini-item highlight">
-              <span class="stat-mini-num">{{ officialUpdatesTotal || 391 }}</span>
+              <span class="stat-mini-num">{{ officialUpdatesTotal != null ? officialUpdatesTotal : 0 }}</span>
               <span class="stat-mini-lbl">官方原厂动态</span>
             </div>
             <div class="stat-mini-item">
-              <span class="stat-mini-num">{{ total || 15 }}</span>
+              <span class="stat-mini-num">{{ total != null ? total : 0 }}</span>
               <span class="stat-mini-lbl">已核实模型</span>
             </div>
           </div>
 
           <div class="stat-footer-bar">
             <span>⏱️ 最近同步: {{ status?.lastCheckTime || '刚刚' }}</span>
-            <span class="sla-badge" title="高频 RSS/API 来源 5~15 分钟级自适应探测">⚡ 时效 P95 ≤ {{ status?.slaLatencyP95Minutes || 15 }}m</span>
+            <!-- 追加 23/26: P95 由真实样本计算; 无数据显示暂无统计, 积压期如实展示发现延迟天数 -->
+            <span
+              v-if="status?.slaLatencyP95Minutes == null"
+              class="sla-badge"
+              title="样本不足, 暂无统计"
+            >⏱️ 时效 P95 暂无统计</span>
+            <span
+              v-else-if="status.slaLatencyP95Minutes <= 1440"
+              class="sla-badge"
+              title="近 30 天内发布的官方内容, 从发布到本站捕获的 P95 时延"
+            >⚡ 发现延迟 P95 ≤ {{ status.slaLatencyP95Minutes }}m</span>
+            <span
+              v-else
+              class="sla-badge"
+              title="近 30 天发布内容中存在长尾未及时捕获的积压, 整改进行中"
+            >⏳ 发现延迟 P95 ≈ {{ (status.slaLatencyP95Minutes / 1440).toFixed(1) }} 天 (积压整改中)</span>
+          </div>
+        </div>
+
+        <!-- 2. 大模型前沿战力天梯挂件 (方案阶段 4 + 阶段 5 评测天梯) -->
+        <div class="sidebar-block leaderboard-card">
+          <div class="sidebar-block-head">
+            <h4 class="sidebar-block-title">🏆 权威评测天梯</h4>
+            <span class="suite-pill">Epoch AI / LMSYS</span>
+          </div>
+          <p class="sidebar-block-sub">严选多项学术与工程基准，呈现真实落地产出战力</p>
+
+          <!-- 评测基准切换 Tab -->
+          <div class="leaderboard-tabs">
+            <button
+              v-for="tab in benchmarkTabs"
+              :key="tab.key"
+              class="lb-tab-btn"
+              :class="{ active: benchmarkSortBy === tab.key }"
+              @click="switchBenchmarkSort(tab.key)"
+            >
+              {{ tab.label }}
+            </button>
+          </div>
+
+          <!-- 加载中 -->
+          <div v-if="benchmarkLoading" class="lb-loading">
+            <span class="loading-spinner-bar sm"></span>
+            <span class="loading-tip">更新战绩中...</span>
+          </div>
+
+          <!-- 空态 -->
+          <div v-else-if="benchmarkLeaderboard.length === 0" class="lb-empty">
+            暂无评测数据沉淀
+          </div>
+
+          <!-- 战力排行榜列表 -->
+          <div v-else class="lb-list">
+            <div
+              v-for="(item, idx) in benchmarkLeaderboard"
+              :key="item.modelId || idx"
+              class="lb-item-row"
+            >
+              <div class="lb-rank" :class="`rank-${idx + 1}`">{{ idx + 1 }}</div>
+              <div class="lb-content">
+                <div class="lb-header">
+                  <span class="lb-model-name" :title="item.modelName">{{ item.modelName }}</span>
+                  <span class="lb-tier-badge" :class="`tier-${getModelTierName(item).toLowerCase().replace('+', '-plus')}`">
+                    {{ getModelTierName(item) }}
+                  </span>
+                </div>
+                <div class="lb-vendor-score">
+                  <span class="lb-vendor">{{ item.vendorName }}</span>
+                  <span class="lb-score-val">
+                    {{ getBenchmarkScore(item) != null ? (benchmarkSortBy === 'arena_elo' ? getBenchmarkScore(item) : `${getBenchmarkScore(item)}%`) : '—' }}
+                  </span>
+                </div>
+                <!-- 水平归一化标尺 -->
+                <div class="lb-bar-track">
+                  <div
+                    class="lb-bar-fill"
+                    :style="{
+                      width: `${benchmarkSortBy === 'arena_elo' ? normalizeElo(getBenchmarkScore(item)) : normalizePercent(getBenchmarkScore(item))}%`,
+                      backgroundColor: idx === 0 ? '#E8B96E' : (idx < 3 ? '#76D4CE' : '#087D82')
+                    }"
+                  ></div>
+                </div>
+              </div>
+            </div>
           </div>
         </div>
 
@@ -2085,6 +2357,7 @@ onMounted(() => {
 }
 
 .leads-category-strip,
+.leads-vendor-strip,
 .leads-month-strip {
   display: flex;
   align-items: center;
@@ -2105,6 +2378,7 @@ onMounted(() => {
   color: #103443;
 }
 .lead-category-pill,
+.lead-vendor-pill,
 .lead-month-pill {
   background: transparent;
   border: 1px solid rgba(16, 52, 67, 0.15);
@@ -2114,16 +2388,42 @@ onMounted(() => {
   cursor: pointer;
   color: #103443;
   transition: all 0.2s;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
 }
 .lead-category-pill:hover, .lead-category-pill.active,
+.lead-vendor-pill:hover, .lead-vendor-pill.active,
 .lead-month-pill:hover, .lead-month-pill.active {
   background: #103443;
   color: #FFFDF7;
   border-color: #103443;
 }
-.lead-category-pill.active {
+.lead-category-pill.active,
+.lead-vendor-pill.active {
   background: #087D82;
   border-color: #087D82;
+}
+.v-pill-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  display: inline-block;
+  flex-shrink: 0;
+}
+.vendor-expand-toggle-btn {
+  background: transparent;
+  border: none;
+  font-size: 11px;
+  font-weight: 700;
+  color: #087D82;
+  cursor: pointer;
+  padding: 4px 8px;
+  border-radius: 4px;
+}
+.vendor-expand-toggle-btn:hover {
+  background: rgba(8, 125, 130, 0.1);
+  text-decoration: underline;
 }
 
 .official-leads-column {
@@ -2219,6 +2519,12 @@ onMounted(() => {
   overflow: hidden;
   text-overflow: ellipsis;
 }
+
+/* 暂无摘要占位 (追加 17: 模板句不再冒充已核实说明) */
+.lead-summary-zh.summary-placeholder {
+  color: #8aa0a8;
+  font-style: italic;
+}
 .lead-meta {
   font-size: 12px;
   color: rgba(16, 52, 67, 0.65);
@@ -2261,6 +2567,197 @@ onMounted(() => {
   background: rgba(8, 125, 130, 0.08);
   padding: 2px 6px;
   border-radius: 4px;
+}
+
+/* 评测天梯榜挂件样式 */
+.leaderboard-card {
+  background: #FFFDF7;
+  border: 1px solid rgba(16, 52, 67, 0.1);
+  border-radius: 12px;
+  padding: 16px;
+  margin-bottom: 20px;
+}
+.suite-pill {
+  font-size: 10px;
+  font-weight: 700;
+  color: #76D4CE;
+  background: #103443;
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+.leaderboard-tabs {
+  display: flex;
+  gap: 6px;
+  margin: 12px 0;
+  overflow-x: auto;
+  padding-bottom: 2px;
+}
+.lb-tab-btn {
+  background: rgba(16, 52, 67, 0.05);
+  border: 1px solid transparent;
+  color: #103443;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 4px 8px;
+  border-radius: 6px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: all 0.2s;
+}
+.lb-tab-btn:hover {
+  background: rgba(8, 125, 130, 0.1);
+}
+.lb-tab-btn.active {
+  background: #087D82;
+  color: #FFFDF7;
+}
+.lb-loading, .lb-empty {
+  padding: 16px;
+  text-align: center;
+  font-size: 12px;
+  color: #59717a;
+}
+.lb-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.lb-item-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 6px 0;
+  border-bottom: 1px solid rgba(16, 52, 67, 0.04);
+}
+.lb-item-row:last-child {
+  border-bottom: none;
+}
+.lb-rank {
+  font-size: 12px;
+  font-weight: 800;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(16, 52, 67, 0.08);
+  color: #103443;
+  flex-shrink: 0;
+}
+.lb-rank.rank-1 {
+  background: #E8B96E;
+  color: #2b1f0c;
+}
+.lb-rank.rank-2 {
+  background: #76D4CE;
+  color: #0c3033;
+}
+.lb-rank.rank-3 {
+  background: rgba(8, 125, 130, 0.25);
+  color: #087D82;
+}
+.lb-content {
+  flex: 1;
+  min-width: 0;
+}
+.lb-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 3px;
+}
+.lb-model-name {
+  font-size: 12.5px;
+  font-weight: 700;
+  color: #103443;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.lb-tier-badge {
+  font-size: 9.5px;
+  font-weight: 800;
+  padding: 1px 5px;
+  border-radius: 4px;
+  flex-shrink: 0;
+}
+.lb-tier-badge.tier-s-plus {
+  background: #f43f5e;
+  color: #ffffff;
+}
+.lb-tier-badge.tier-s {
+  background: #E8B96E;
+  color: #382404;
+}
+.lb-tier-badge.tier-a {
+  background: #76D4CE;
+  color: #0f3c3a;
+}
+.lb-tier-badge.tier-b {
+  background: rgba(8, 125, 130, 0.15);
+  color: #087D82;
+}
+.lb-tier-badge.tier-c {
+  background: #ecefe8;
+  color: #4b635d;
+}
+.lb-vendor-score {
+  display: flex;
+  justify-content: space-between;
+  font-size: 11px;
+  color: #59717a;
+  margin-bottom: 4px;
+}
+.lb-score-val {
+  font-weight: 700;
+  color: #087D82;
+}
+.lb-bar-track {
+  height: 4px;
+  background: rgba(16, 52, 67, 0.06);
+  border-radius: 2px;
+  overflow: hidden;
+}
+.lb-bar-fill {
+  height: 100%;
+  border-radius: 2px;
+  transition: width 0.4s ease;
+}
+
+/* 9大前沿主题与论文角标 */
+.confirmed-cat-strip {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 14px;
+}
+.arxiv-pill-tag {
+  display: inline-flex;
+  align-items: center;
+  font-size: 11px;
+  font-weight: 700;
+  color: #991b1b;
+  background: #fee2e2;
+  padding: 2px 6px;
+  border-radius: 4px;
+  text-decoration: none;
+  border: 1px solid rgba(153, 27, 27, 0.2);
+  transition: all 0.2s;
+}
+.arxiv-pill-tag:hover {
+  background: #fecaca;
+  color: #7f1d1d;
+  text-decoration: underline;
+}
+.item-cat-tag {
+  font-size: 11px;
+  font-weight: 700;
+  padding: 2px 6px;
+  border-radius: 4px;
+  border: 1px solid;
 }
 
 /* ====================================================

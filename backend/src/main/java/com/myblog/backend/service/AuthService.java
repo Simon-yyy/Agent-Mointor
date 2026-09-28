@@ -32,6 +32,16 @@ public class AuthService {
     @Value("${blog.auth.secret:MyBlogSecureJwtTokenSecretKey2026!}")
     private String secretKey;
 
+    @jakarta.annotation.PostConstruct
+    public void validateSecurityConfig() {
+        if ("admin123".equals(adminPassword)) {
+            log.warn("⚠️ [安全防范] 当前使用的是内置默认管理密码 'admin123'！若在生产环境部署，必须配置环境变量 BLOG_ADMIN_PASSWORD 进行加固覆盖！");
+        }
+        if ("MyBlogSecureJwtTokenSecretKey2026!".equals(secretKey)) {
+            log.warn("⚠️ [安全防范] 当前使用的是内置默认 Token 签名密钥！若在生产环境部署，必须配置环境变量 BLOG_AUTH_SECRET 进行强密钥加固！");
+        }
+    }
+
     public LoginDto.LoginResponse login(LoginDto.LoginRequest request) {
         if (!adminUsername.equals(request.getUsername()) || !adminPassword.equals(request.getPassword())) {
             throw new BusinessException(401, "用户名或密码错误");

@@ -19,8 +19,12 @@ public class OfficialUpdateDto {
     private String category; // MODEL_RELEASE, PRODUCT_FEATURE, API_PRICING, OPEN_SOURCE, DEV_TOOLS, GENERAL_NEWS
     private String categoryName;
     private String summaryZh;
+    private boolean dateUncertain; // 追加 17: 发布日与首次抓取日同日时, 日期来源为回填, 展示为"日期待核实"
 
     public OfficialUpdateDto() {}
+
+    public boolean isDateUncertain() { return dateUncertain; }
+    public void setDateUncertain(boolean dateUncertain) { this.dateUncertain = dateUncertain; }
 
     public Long getId() { return id; }
     public void setId(Long id) { this.id = id; }

@@ -123,13 +123,13 @@ public class AiModelCrawlService {
                 // 2.1 HTTP 304 Not Modified: 源站内容无更新
                 if (statusCode == 304) {
                     succeeded++;
+                    // CODE_REVIEW 追加 33 修复: 304 仅代表传输层缓存未变，必须保留原 content_status 与解析计数，严禁强写为 HEALTHY
                     jdbcTemplate.update(
                             "UPDATE `model_sources` SET `last_success_time` = NOW(3), `failure_count` = 0, `last_error` = NULL, " +
-                            "`content_status` = 'HEALTHY', `consecutive_empty_count` = 0, " +
                             "`next_check_time` = DATE_ADD(NOW(3), INTERVAL ? SECOND) WHERE `id` = ?",
                             checkInterval, sourceId
                     );
-                    log.info("✓ 官方来源 304 缓存命中 (无新动态): [{} -> {}], 调度步长: {}s", vendorName, url, checkInterval);
+                    log.info("✓ 官方来源 304 缓存命中 (源站内容未修改): [{} -> {}], 调度步长: {}s", vendorName, url, checkInterval);
                     continue;
                 }
 
@@ -144,13 +144,21 @@ public class AiModelCrawlService {
                     totalNewCandidates += result.candidatesCreated;
                     totalItemsParsed += result.itemsParsed;
 
-                    // 内容健康度判定 (Content Health Guard)
-                    int nextEmptyCount = result.itemsParsed == 0 ? (consecutiveEmpty + 1) : 0;
-                    String contentStatus = nextEmptyCount >= 3 ? "PARSE_EMPTY" : "HEALTHY";
-
-                    if (nextEmptyCount >= 3) {
-                        log.warn("⚠️ [内容健康度告警] 官方来源连续 {} 次解析为 0 条有效公告: [{} -> {}]，可能遭遇站点改版或反爬拦截",
-                                nextEmptyCount, vendorName, url);
+                    // 内容健康度判定 (Content Health Guard - CODE_REVIEW 追加 29 质量断言守护)
+                    // 1. 若条目数为 0 或未解析出有效发布日期 (latestPublishedDate == null)，说明未提取到带时间戳的有效动态，判定为 PARSE_EMPTY
+                    // 2. 只有当条目数 > 0 且具有有效发布日期证据时，才标定为 HEALTHY
+                    int nextEmptyCount;
+                    String contentStatus;
+                    if (result.itemsParsed == 0 || result.latestPublishedDate == null) {
+                        nextEmptyCount = consecutiveEmpty + 1;
+                        contentStatus = "PARSE_EMPTY";
+                        if (nextEmptyCount >= 3) {
+                            log.warn("⚠️ [内容健康度告警] 官方来源连续 {} 次未能解析出带日期的有效公告: [{} -> {}]，可能遭遇站点改版、SPA动态加载或反爬拦截",
+                                    nextEmptyCount, vendorName, url);
+                        }
+                    } else {
+                        nextEmptyCount = 0;
+                        contentStatus = "HEALTHY";
                     }
 
                     java.sql.Date latestSqlDate = result.latestPublishedDate != null ? java.sql.Date.valueOf(result.latestPublishedDate) : null;
@@ -309,6 +317,12 @@ public class AiModelCrawlService {
 
         // 如果是 HTML 官方发布页
         if ("HTML".equalsIgnoreCase(sourceType) || (!body.trim().startsWith("<?xml") && !body.trim().startsWith("<rss") && !body.trim().startsWith("<feed"))) {
+            if (sourceUrl != null && sourceUrl.toLowerCase().contains("changelog")) {
+                ParseResult changelogResult = parseChangelogAnnouncements(sourceId, vendorId, vendorName, sourceUrl, body);
+                if (changelogResult.itemsParsed > 0) {
+                    return changelogResult;
+                }
+            }
             return parseHtmlAnnouncements(sourceId, vendorId, vendorName, sourceUrl, body);
         }
 
@@ -377,9 +391,114 @@ public class AiModelCrawlService {
             }
         } catch (Exception ex) {
             log.debug("XML 解析跳过，转入 HTML 扫描: {} -> {}", sourceUrl, ex.getMessage());
+            if (sourceUrl != null && sourceUrl.toLowerCase().contains("changelog")) {
+                ParseResult changelogResult = parseChangelogAnnouncements(sourceId, vendorId, vendorName, sourceUrl, body);
+                if (changelogResult.itemsParsed > 0) {
+                    return changelogResult;
+                }
+            }
             return parseHtmlAnnouncements(sourceId, vendorId, vendorName, sourceUrl, body);
         }
 
+        return result;
+    }
+
+    /**
+     * 针对变更日志 (Changelog) 页面的专用结构抽取器 (CODE_REVIEW 追加 29/33/34)
+     * 支持跨大标题层级继承年份/月份上下文，准确抽取日级别更新条目，并生成同页多条稳定唯一锚点
+     */
+    private ParseResult parseChangelogAnnouncements(Long sourceId, Long vendorId, String vendorName, String sourceUrl, String htmlBody) {
+        ParseResult result = new ParseResult();
+        if (htmlBody == null || htmlBody.isBlank()) return result;
+
+        // 提取所有 h1-h5 标题元素及其位置
+        Pattern headingPattern = Pattern.compile("<h([1-5])[^>]*>(.*?)</h\\1>", Pattern.CASE_INSENSITIVE | Pattern.DOTALL);
+        Matcher matcher = headingPattern.matcher(htmlBody);
+
+        List<HeadingBlock> blocks = new ArrayList<>();
+        while (matcher.find()) {
+            String titleText = matcher.group(2).replaceAll("<[^>]+>", " ").replaceAll("\\s+", " ").trim();
+            blocks.add(new HeadingBlock(matcher.start(), matcher.end(), titleText));
+        }
+
+        if (blocks.isEmpty()) return result;
+
+        Integer currentYear = null;
+        Integer currentMonth = null;
+        int count = 0;
+
+        Pattern monthYearPattern = Pattern.compile("(?i)(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*,?\\s+(\\d{4})");
+        Pattern yearMonthPattern = Pattern.compile("(\\d{4})\\s*[-/年]\\s*(\\d{1,2})");
+        Pattern monthDayPattern = Pattern.compile("(?i)(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\\s+(\\d{1,2})(?:st|nd|rd|th)?");
+
+        for (int i = 0; i < blocks.size() && count < 50; i++) {
+            HeadingBlock current = blocks.get(i);
+            String title = current.text;
+
+            // 1. 检查是否为"月份 年份"大标题 (如 "September, 2026" 或 "2026年9月")
+            Matcher myM = monthYearPattern.matcher(title);
+            if (myM.find()) {
+                currentMonth = parseMonthNumber(myM.group(1));
+                currentYear = Integer.parseInt(myM.group(2));
+            } else {
+                Matcher ymM = yearMonthPattern.matcher(title);
+                if (ymM.find()) {
+                    currentYear = Integer.parseInt(ymM.group(1));
+                    currentMonth = Integer.parseInt(ymM.group(2));
+                }
+            }
+
+            // 2. 尝试从当前标题提取完整日期
+            LocalDate itemDate = parseToDate(title);
+
+            // 3. 若未获得完整日期，但有月-日标题且存在上下文年份 (如 "Sep 25" 或 "September 22")
+            if (itemDate == null && currentYear != null) {
+                Matcher mdM = monthDayPattern.matcher(title);
+                if (mdM.find()) {
+                    int m = parseMonthNumber(mdM.group(1));
+                    int d = Integer.parseInt(mdM.group(2));
+                    try {
+                        itemDate = LocalDate.of(currentYear, m, d);
+                    } catch (Exception ignored) {}
+                }
+            }
+
+            // 4. 若为有效条目标题且获得了有效日期
+            if (itemDate != null) {
+                // 计算该标题所辖正文内容（直到下一个同级或高级标题）
+                int contentStart = current.endPos;
+                int contentEnd = (i + 1 < blocks.size()) ? blocks.get(i + 1).startPos : htmlBody.length();
+                if (contentEnd > contentStart) {
+                    String rawContent = htmlBody.substring(contentStart, contentEnd);
+                    String cleanContent = rawContent.replaceAll("<[^>]+>", " ").replaceAll("\\s+", " ").trim();
+                    if (cleanContent.length() > 10) {
+                        String summary = cleanContent.length() > 300 ? cleanContent.substring(0, 300) + "..." : cleanContent;
+                        // 生成清晰标题与稳定条目锚点
+                        String entryTitle = title.contains(String.valueOf(itemDate.getYear())) ? title : (title + ", " + itemDate.getYear());
+                        if (entryTitle.length() < 15 && cleanContent.length() > 5) {
+                            String firstSentence = cleanContent.split("[\\.\\!\\?\\n。！]")[0].trim();
+                            if (!firstSentence.isBlank()) {
+                                entryTitle += ": " + (firstSentence.length() > 80 ? firstSentence.substring(0, 80) + "..." : firstSentence);
+                            }
+                        }
+
+                        // 生成源内稳定唯一键，避免全局 canonical_url 冲突
+                        String slug = entryTitle.replaceAll("[^a-zA-Z0-9]+", "-").toLowerCase();
+                        if (slug.length() > 40) slug = slug.substring(0, 40);
+                        String itemUrl = sourceUrl + "#" + itemDate + "-" + slug;
+
+                        result.itemsParsed++;
+                        if (result.latestPublishedDate == null || itemDate.isAfter(result.latestPublishedDate)) {
+                            result.latestPublishedDate = itemDate;
+                        }
+
+                        boolean created = recordSourceItemAndCandidate(sourceId, vendorId, vendorName, sourceUrl, entryTitle, itemUrl, summary, itemDate);
+                        if (created) result.candidatesCreated++;
+                        count++;
+                    }
+                }
+            }
+        }
         return result;
     }
 
@@ -389,6 +508,8 @@ public class AiModelCrawlService {
     private ParseResult parseHtmlAnnouncements(Long sourceId, Long vendorId, String vendorName, String sourceUrl, String htmlBody) {
         ParseResult result = new ParseResult();
         if (htmlBody == null || htmlBody.isBlank()) return result;
+
+        boolean isChangelogSource = sourceUrl != null && sourceUrl.toLowerCase().contains("changelog");
 
         Pattern pattern = Pattern.compile("<a\\s+(?:[^>]*?\\s+)?href=[\"']([^\"']+)[\"'][^>]*>(.*?)</a>", Pattern.CASE_INSENSITIVE | Pattern.DOTALL);
         Matcher m = pattern.matcher(htmlBody);
@@ -408,9 +529,15 @@ public class AiModelCrawlService {
             String lowerTitleCheck = rawTitle.toLowerCase();
             if (lowerHref.contains("tools") || lowerHref.contains("download") || lowerHref.contains("help")
                     || lowerHref.contains("privacy") || lowerHref.contains("terms") || lowerHref.contains("contact")
+                    || lowerHref.contains("llms.txt") || lowerHref.contains("/docs/") || lowerHref.contains("api/docs")
+                    || lowerHref.equals("/api/docs") || lowerHref.equals("/docs")
                     || lowerTitleCheck.contains("生成器") || lowerTitleCheck.contains("翻译器")
                     || lowerTitleCheck.contains("转换器") || lowerTitleCheck.contains("下载")
-                    || lowerTitleCheck.contains("关于我们") || lowerTitleCheck.contains("用户协议")) {
+                    || lowerTitleCheck.contains("关于我们") || lowerTitleCheck.contains("用户协议")
+                    || lowerTitleCheck.equals("docs") || lowerTitleCheck.equals("documentation")
+                    || lowerTitleCheck.equals("resources") || lowerTitleCheck.equals("changelog")
+                    || lowerTitleCheck.equals("chatgpt") || lowerTitleCheck.equals("overview")
+                    || lowerTitleCheck.equals("pricing")) {
                 continue;
             }
 
@@ -424,6 +551,11 @@ public class AiModelCrawlService {
             if (!fullUrl.startsWith("http")) continue;
 
             LocalDate guessDate = parseToDate(rawTitle);
+
+            // 对于 changelog 类页面或文档页面，若没有有效日期，一律判定为导航/侧边栏链接跳过，杜绝假阳性
+            if (isChangelogSource && guessDate == null) {
+                continue;
+            }
 
             result.itemsParsed++;
             if (guessDate != null && (result.latestPublishedDate == null || guessDate.isAfter(result.latestPublishedDate))) {
@@ -454,22 +586,35 @@ public class AiModelCrawlService {
 
         java.sql.Date sqlDate = publishedDate != null ? java.sql.Date.valueOf(publishedDate) : null;
 
-        // 1. 存入 source_items (带 source_id 归属、四维时间戳并在冲突时自动补全空日期与缺失的 source_id)
+        // 0. 静态资源页识别 (追加 17 止血): 条款/招聘/隐私/导航等标记 is_static_resource=1,
+        //    仍入库留作审计, 但不进入公开动态流, 也不生成模型候选
+        boolean staticResource = com.myblog.backend.aimodel.catalog.validate.StaticResourceRule
+                .isStaticResource(title, link);
+
+        // 1. 存入 source_items (带 source_id 归属、四维时间戳并在冲突时防覆盖已有人工锁定)
         try {
             String insertSourceItemSql = "INSERT INTO `source_items` " +
-                    "(`canonical_url`, `source_id`, `vendor_id`, `title`, `raw_summary`, `published_at`, `first_seen_at`, `ingested_at`, `visible_at`, `process_status`, `created_at`) " +
-                    "VALUES (?, ?, ?, ?, ?, ?, NOW(3), NOW(3), NOW(3), 'PENDING', NOW(3)) " +
+                    "(`canonical_url`, `source_id`, `vendor_id`, `title`, `raw_summary`, `published_at`, `first_seen_at`, `ingested_at`, `visible_at`, `process_status`, `is_static_resource`, `created_at`) " +
+                    "VALUES (?, ?, ?, ?, ?, ?, NOW(3), NOW(3), NOW(3), 'PENDING', ?, NOW(3)) " +
                     "ON DUPLICATE KEY UPDATE " +
-                    "`source_id` = COALESCE(`source_id`, VALUES(`source_id`)), " +
-                    "`vendor_id` = COALESCE(`vendor_id`, VALUES(`vendor_id`)), " +
-                    "`published_at` = COALESCE(`published_at`, VALUES(`published_at`)), " +
+                    "`source_id` = COALESCE(VALUES(`source_id`), `source_id`), " +
+                    "`vendor_id` = COALESCE(VALUES(`vendor_id`), `vendor_id`), " +
+                    "`published_at` = COALESCE(VALUES(`published_at`), `published_at`), " +
                     "`ingested_at` = COALESCE(`ingested_at`, NOW(3)), " +
-                    "`visible_at` = COALESCE(`visible_at`, NOW(3))";
+                    "`visible_at` = COALESCE(`visible_at`, NOW(3)), " +
+                    "`is_static_resource` = CASE WHEN `locked_by_reviewer` = 1 THEN 1 ELSE GREATEST(`is_static_resource`, VALUES(`is_static_resource`)) END";
             jdbcTemplate.update(insertSourceItemSql, link, sourceId, vendorId,
                     title.length() > 400 ? title.substring(0, 400) : title,
                     desc != null && desc.length() > 800 ? desc.substring(0, 800) : desc,
-                    sqlDate);
-        } catch (Exception ignored) {}
+                    sqlDate, staticResource ? 1 : 0);
+        } catch (Exception e) {
+            log.warn("【采集入库】写入条目异常: link={}, err={}", link, e.getMessage());
+        }
+
+        if (staticResource) {
+            log.info("【采集】识别为静态资源页, 跳过候选生成: {}", link);
+            return false;
+        }
 
         // 2. 识别是否包含 AI 大模型发布特征词
         String lowerTitle = (title + " " + (desc != null ? desc : "")).toLowerCase();
@@ -585,5 +730,37 @@ public class AiModelCrawlService {
         }
 
         return List.of(vendorName + " 官方动态");
+    }
+
+    private static class HeadingBlock {
+        final int startPos;
+        final int endPos;
+        final String text;
+
+        HeadingBlock(int startPos, int endPos, String text) {
+            this.startPos = startPos;
+            this.endPos = endPos;
+            this.text = text;
+        }
+    }
+
+    private static int parseMonthNumber(String monthStr) {
+        if (monthStr == null || monthStr.length() < 3) return 1;
+        String m = monthStr.substring(0, 3).toLowerCase(Locale.ROOT);
+        return switch (m) {
+            case "jan" -> 1;
+            case "feb" -> 2;
+            case "mar" -> 3;
+            case "apr" -> 4;
+            case "may" -> 5;
+            case "jun" -> 6;
+            case "jul" -> 7;
+            case "aug" -> 8;
+            case "sep" -> 9;
+            case "oct" -> 10;
+            case "nov" -> 11;
+            case "dec" -> 12;
+            default -> 1;
+        };
     }
 }

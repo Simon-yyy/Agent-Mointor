@@ -65,11 +65,29 @@ public class AiModelRepository {
         Timestamp ts = rs.getTimestamp("created_at");
         m.setCreatedAt(ts != null ? ts.toLocalDateTime().format(FMT) : null);
 
+        // 真实客观规格字段 (Flyway V18)
+        try {
+            m.setSummaryZh(rs.getString("summary_zh"));
+            java.sql.Date ord = rs.getDate("official_release_date");
+            m.setOfficialReleaseDate(ord != null ? ord.toString() : null);
+            m.setContextWindow(rs.getString("context_window"));
+            m.setParameterSize(rs.getString("parameter_size"));
+            m.setLicense(rs.getString("license"));
+            m.setModelCardUrl(rs.getString("model_card_url"));
+        } catch (SQLException ignored) {}
+
         // 可选连接字段
         try {
             m.setVendorName(rs.getString("vendor_name"));
             m.setVendorSlug(rs.getString("vendor_slug"));
             m.setBrandColor(rs.getString("brand_color"));
+            m.setVendorRegion(rs.getString("vendor_region"));
+            m.setReleaseDatePrecision(rs.getString("release_date_precision"));
+            m.setFactsProvenance(rs.getString("facts_provenance"));
+            m.setPricingInputPerM(rs.getBigDecimal("pricing_input_per_m"));
+            m.setPricingOutputPerM(rs.getBigDecimal("pricing_output_per_m"));
+            m.setPricingCachedPerM(rs.getBigDecimal("pricing_cached_per_m"));
+            m.setCatalogStatus(rs.getString("catalog_status"));
         } catch (SQLException ignored) {}
 
         return m;
@@ -105,6 +123,11 @@ public class AiModelRepository {
             e.setVendorName(rs.getString("vendor_name"));
             e.setVendorSlug(rs.getString("vendor_slug"));
             e.setBrandColor(rs.getString("brand_color"));
+            e.setCategory(rs.getString("category"));
+            e.setArxivId(rs.getString("arxiv_id"));
+            e.setPaperUrl(rs.getString("paper_url"));
+            e.setTechnicalReportUrl(rs.getString("technical_report_url"));
+            e.setKeyBreakthrough(rs.getString("key_breakthrough"));
         } catch (SQLException ignored) {}
 
         return e;
@@ -166,9 +189,13 @@ public class AiModelRepository {
     }
 
     // 2. 模型查询
+    // 公开可见性过滤 (追加 17): 待审模型 (PENDING_REVIEW) 与待审厂商 (PENDING) 不进入任何公开查询
+    private static final String PUBLIC_VISIBILITY_FILTER =
+            " AND m.catalog_status <> 'PENDING_REVIEW' AND (v.status IS NULL OR v.status <> 'PENDING') ";
+
     public List<AiModel> findAllModels(Long vendorId, String series) {
-        StringBuilder sql = new StringBuilder("SELECT m.*, v.name as vendor_name, v.slug as vendor_slug, v.brand_color " +
-                "FROM `ai_models` m LEFT JOIN `model_vendors` v ON m.vendor_id = v.id WHERE 1=1 ");
+        StringBuilder sql = new StringBuilder("SELECT m.*, v.name as vendor_name, v.slug as vendor_slug, v.brand_color, v.region as vendor_region " +
+                "FROM `ai_models` m LEFT JOIN `model_vendors` v ON m.vendor_id = v.id WHERE 1=1 " + PUBLIC_VISIBILITY_FILTER);
         List<Object> params = new ArrayList<>();
         if (vendorId != null) {
             sql.append("AND m.vendor_id = ? ");
@@ -182,15 +209,106 @@ public class AiModelRepository {
         return jdbcTemplate.query(sql.toString(), aiModelRowMapper, params.toArray());
     }
 
+    /**
+     * 服务端多维分页查询模型目录 (CODE_REVIEW 追加 15 支持国内/海外及多选模态组合)
+     */
+    public PageResult<AiModel> findPagedModels(Long vendorId, String series, String keyword, String modality,
+                                              String availability, String region, String sort, int page, int size) {
+        StringBuilder where = new StringBuilder(" WHERE 1=1 ").append(PUBLIC_VISIBILITY_FILTER);
+        List<Object> params = new ArrayList<>();
+
+        if (vendorId != null) {
+            where.append("AND m.vendor_id = ? ");
+            params.add(vendorId);
+        }
+        if (series != null && !series.isBlank()) {
+            where.append("AND m.series = ? ");
+            params.add(series);
+        }
+        if (availability != null && !availability.isBlank()) {
+            where.append("AND m.availability_status = ? ");
+            params.add(availability.trim());
+        }
+
+        // 国内/国外分类筛选 (DOMESTIC / OVERSEAS)
+        if (region != null && !region.isBlank()) {
+            String r = region.trim().toUpperCase();
+            if ("DOMESTIC".equals(r) || "CHINA".equals(r) || "国内".equals(region.trim())) {
+                where.append("AND v.region = '中国' ");
+            } else if ("OVERSEAS".equals(r) || "GLOBAL".equals(r) || "国外".equals(region.trim()) || "海外".equals(region.trim())) {
+                where.append("AND (v.region != '中国' OR v.region IS NULL) ");
+            }
+        }
+
+        // 多模态能力多选支持 (逗号分隔，如 "视觉,代码" 取交集)
+        if (modality != null && !modality.isBlank()) {
+            String[] mods = modality.split(",");
+            for (String mStr : mods) {
+                if (!mStr.isBlank()) {
+                    where.append("AND m.modalities LIKE ? ");
+                    params.add("%" + mStr.trim() + "%");
+                }
+            }
+        }
+
+        if (keyword != null && !keyword.isBlank()) {
+            String kw = "%" + keyword.trim() + "%";
+            where.append("AND (m.display_name LIKE ? OR m.model_key LIKE ? OR m.series LIKE ? OR v.name LIKE ? OR m.summary_zh LIKE ?) ");
+            params.add(kw);
+            params.add(kw);
+            params.add(kw);
+            params.add(kw);
+            params.add(kw);
+        }
+
+        String countSql = "SELECT COUNT(*) FROM `ai_models` m LEFT JOIN `model_vendors` v ON m.vendor_id = v.id " + where;
+        Long total = jdbcTemplate.queryForObject(countSql, Long.class, params.toArray());
+        if (total == null || total == 0) {
+            return PageResult.of(Collections.emptyList(), 0, page, size);
+        }
+
+        StringBuilder querySql = new StringBuilder("SELECT m.*, v.name as vendor_name, v.slug as vendor_slug, v.brand_color, v.region as vendor_region " +
+                "FROM `ai_models` m LEFT JOIN `model_vendors` v ON m.vendor_id = v.id " + where);
+
+        if ("name".equalsIgnoreCase(sort)) {
+            querySql.append("ORDER BY m.display_name ASC ");
+        } else if ("recent".equalsIgnoreCase(sort)) {
+            // "最近收录"为显式独立选项 (追加 22): 收录时间不冒充发布时间
+            querySql.append("ORDER BY m.created_at DESC, m.id DESC ");
+        } else {
+            // 默认"最新发布" (追加 22): 只按已核实官方发布日期倒序;
+            // 无日期卡排最后并标"日期待核实", 收录时间 created_at 不再参与排序;
+            // 同日以稳定 id 兜底, 保证翻页不重复不漏项
+            querySql.append("ORDER BY (m.official_release_date IS NULL) ASC, m.official_release_date DESC, m.id DESC ");
+        }
+
+        int pageSize = Math.min(Math.max(size, 1), 100);
+        int pageNum = Math.max(page, 1);
+        int offset = (pageNum - 1) * pageSize;
+
+        querySql.append("LIMIT ? OFFSET ?");
+        List<Object> queryParams = new ArrayList<>(params);
+        queryParams.add(pageSize);
+        queryParams.add(offset);
+
+        List<AiModel> list = jdbcTemplate.query(querySql.toString(), aiModelRowMapper, queryParams.toArray());
+        return PageResult.of(list, total, pageNum, pageSize);
+    }
+
     public Optional<AiModel> findModelById(Long id) {
-        String sql = "SELECT m.*, v.name as vendor_name, v.slug as vendor_slug, v.brand_color " +
-                "FROM `ai_models` m LEFT JOIN `model_vendors` v ON m.vendor_id = v.id WHERE m.id = ?";
+        String sql = "SELECT m.*, v.name as vendor_name, v.slug as vendor_slug, v.brand_color, v.region as vendor_region " +
+                "FROM `ai_models` m LEFT JOIN `model_vendors` v ON m.vendor_id = v.id " +
+                "WHERE m.id = ? " + PUBLIC_VISIBILITY_FILTER;
         List<AiModel> list = jdbcTemplate.query(sql, aiModelRowMapper, id);
         return list.isEmpty() ? Optional.empty() : Optional.of(list.get(0));
     }
 
-    // 3. 事件查询 (多维筛选 + 分页)
+    // 3. 事件查询 (多维筛选 + 分页，方案阶段 7 支持 9 大分类多选)
     public List<ModelEvent> queryEvents(String keyword, String vendor, String modality, String eventType, int page, int size) {
+        return queryEvents(keyword, vendor, modality, eventType, null, page, size);
+    }
+
+    public List<ModelEvent> queryEvents(String keyword, String vendor, String modality, String eventType, String category, int page, int size) {
         StringBuilder sql = new StringBuilder(
                 "SELECT e.*, m.display_name as model_name, m.model_key, m.series, m.modalities, m.availability_status, " +
                 "v.name as vendor_name, v.slug as vendor_slug, v.brand_color " +
@@ -213,6 +331,20 @@ public class AiModelRepository {
         if (eventType != null && !eventType.isBlank()) {
             sql.append("AND e.event_type = ? ");
             params.add(eventType.trim());
+        }
+        if (category != null && !category.isBlank()) {
+            String[] cats = category.split(",");
+            if (cats.length == 1) {
+                sql.append("AND e.category = ? ");
+                params.add(cats[0].trim());
+            } else {
+                sql.append("AND e.category IN (");
+                for (int i = 0; i < cats.length; i++) {
+                    sql.append(i == 0 ? "?" : ", ?");
+                    params.add(cats[i].trim());
+                }
+                sql.append(") ");
+            }
         }
         if (keyword != null && !keyword.isBlank()) {
             sql.append("AND (m.display_name LIKE ? OR e.summary LIKE ? OR v.name LIKE ? OR m.series LIKE ?) ");
@@ -237,6 +369,10 @@ public class AiModelRepository {
     }
 
     public long countEvents(String keyword, String vendor, String modality, String eventType) {
+        return countEvents(keyword, vendor, modality, eventType, null);
+    }
+
+    public long countEvents(String keyword, String vendor, String modality, String eventType, String category) {
         StringBuilder sql = new StringBuilder(
                 "SELECT COUNT(*) FROM `model_events` e " +
                 "JOIN `ai_models` m ON e.model_id = m.id " +
@@ -257,6 +393,20 @@ public class AiModelRepository {
         if (eventType != null && !eventType.isBlank()) {
             sql.append("AND e.event_type = ? ");
             params.add(eventType.trim());
+        }
+        if (category != null && !category.isBlank()) {
+            String[] cats = category.split(",");
+            if (cats.length == 1) {
+                sql.append("AND e.category = ? ");
+                params.add(cats[0].trim());
+            } else {
+                sql.append("AND e.category IN (");
+                for (int i = 0; i < cats.length; i++) {
+                    sql.append(i == 0 ? "?" : ", ?");
+                    params.add(cats[i].trim());
+                }
+                sql.append(") ");
+            }
         }
         if (keyword != null && !keyword.isBlank()) {
             sql.append("AND (m.display_name LIKE ? OR e.summary LIKE ? OR v.name LIKE ? OR m.series LIKE ?) ");
@@ -332,10 +482,12 @@ public class AiModelRepository {
 
     // 5. 真实采集与健康状态统计 (杜绝硬编码伪健康)
     public CrawlStatusDto getStatus() {
+        // 追加 26 口径对齐: 首页数字必须与公开目录同一可见性规则
         Integer vendorCount = jdbcTemplate.queryForObject(
-                "SELECT COUNT(*) FROM `model_vendors` WHERE `is_active` = 1", Integer.class);
+                "SELECT COUNT(*) FROM `model_vendors` WHERE `is_active` = 1 AND `status` = 'ACTIVE'", Integer.class);
         Integer modelCount = jdbcTemplate.queryForObject(
-                "SELECT COUNT(*) FROM `ai_models`", Integer.class);
+                "SELECT COUNT(*) FROM `ai_models` m LEFT JOIN `model_vendors` v ON m.vendor_id = v.id " +
+                        "WHERE 1=1 " + PUBLIC_VISIBILITY_FILTER, Integer.class);
         Integer eventCount = jdbcTemplate.queryForObject(
                 "SELECT COUNT(*) FROM `model_events` WHERE `review_status` = 'CONFIRMED'", Integer.class);
 
@@ -379,28 +531,62 @@ public class AiModelRepository {
                     "SELECT COUNT(*) FROM `model_sources` WHERE `is_active` = 1 AND `content_status` = 'HEALTHY'", Integer.class);
         } catch (Exception ignored) {}
         dto.setContentHealthySources(contentHealthy != null ? contentHealthy : activeSources);
-        dto.setSlaLatencyP95Minutes(15);
 
-        // 最近已核实发布日历日期
+        // SLA P95 (追加 23/26): 由真实采集样本计算, 不再写死 15 分钟;
+        // 仅统计"发布日与抓取日不同"(日期来源可信)的条目, 回填日期的条目无法测真实时延
+        try {
+            Long p95 = jdbcTemplate.queryForObject(
+                    "SELECT MIN(val) FROM (" +
+                        "SELECT TIMESTAMPDIFF(MINUTE, si.published_at, si.first_seen_at) AS val, " +
+                        "ROW_NUMBER() OVER (ORDER BY TIMESTAMPDIFF(MINUTE, si.published_at, si.first_seen_at)) AS rn, " +
+                        "COUNT(*) OVER () AS total " +
+                        "FROM `source_items` si " +
+                        "WHERE si.published_at IS NOT NULL AND DATE(si.published_at) <> DATE(si.first_seen_at) " +
+                        "AND si.published_at >= DATE_SUB(NOW(), INTERVAL 30 DAY) " +
+                        "AND si.first_seen_at >= DATE_SUB(NOW(), INTERVAL 120 DAY)" +
+                    ") t WHERE t.rn >= CEILING(t.total * 0.95)", Long.class);
+            Integer p95Int = p95 != null && p95 >= 0 ? p95.intValue() : null;
+            dto.setSlaLatencyP95Minutes(p95Int);
+        } catch (Exception ignored) {
+            dto.setSlaLatencyP95Minutes(null);
+        }
+
+        // 已核实模型首发 (追加 26): 带证据 + 事件类型为首发/开源 + 关联模型存在的 CONFIRMED 事件
+        try {
+            Integer verifiedReleases = jdbcTemplate.queryForObject(
+                    "SELECT COUNT(*) FROM `model_events` e WHERE e.`review_status` = 'CONFIRMED' " +
+                            "AND e.`event_type` IN ('MODEL_RELEASE', 'WEIGHTS_RELEASE') " +
+                            "AND EXISTS (SELECT 1 FROM `event_evidence` ev WHERE ev.`event_id` = e.id) " +
+                            "AND EXISTS (SELECT 1 FROM `ai_models` m WHERE m.id = e.model_id)", Integer.class);
+            dto.setVerifiedModelReleases(verifiedReleases != null ? verifiedReleases : 0);
+        } catch (Exception ignored) {
+            dto.setVerifiedModelReleases(0);
+        }
+
+        // 最近模型首发 (追加 26): 不再把 PRODUCT_LAUNCH 等产品动态当作"最近模型发布"
         try {
             String latestRelease = jdbcTemplate.queryForObject(
-                    "SELECT DATE_FORMAT(MAX(`release_date`), '%Y-%m-%d') FROM `model_events` WHERE `review_status` = 'CONFIRMED'", String.class);
+                    "SELECT DATE_FORMAT(MAX(e.release_date), '%Y-%m-%d') FROM `model_events` e " +
+                            "WHERE e.`review_status` = 'CONFIRMED' " +
+                            "AND e.`event_type` IN ('MODEL_RELEASE', 'WEIGHTS_RELEASE') " +
+                            "AND e.`release_date` IS NOT NULL " +
+                            "AND EXISTS (SELECT 1 FROM `event_evidence` ev WHERE ev.`event_id` = e.id) " +
+                            "AND EXISTS (SELECT 1 FROM `ai_models` m WHERE m.id = e.model_id)", String.class);
             dto.setLatestConfirmedRelease(latestRelease != null ? latestRelease : "—");
         } catch (Exception ignored) {
             dto.setLatestConfirmedRelease("—");
         }
 
-        // 真实能力模型分布聚合 (杜绝虚报与臆造)
+        // 能力分布聚合 (追加 26 口径): 统计对象=公开可见模型(与目录同一过滤), 单标签计数
+        // 与目录筛选 /models?modality=<标签> 完全同口径, 首页卡片数字=点击后结果总数
         Map<String, Integer> capCounts = new LinkedHashMap<>();
         try {
-            Integer textReasoning = jdbcTemplate.queryForObject(
-                    "SELECT COUNT(*) FROM `ai_models` WHERE `modalities` LIKE '%文本%' OR `modalities` LIKE '%推理%'", Integer.class);
-            Integer code = jdbcTemplate.queryForObject(
-                    "SELECT COUNT(*) FROM `ai_models` WHERE `modalities` LIKE '%代码%'", Integer.class);
-            Integer vision = jdbcTemplate.queryForObject(
-                    "SELECT COUNT(*) FROM `ai_models` WHERE `modalities` LIKE '%视觉%' OR `modalities` LIKE '%多模态%'", Integer.class);
-            Integer audio = jdbcTemplate.queryForObject(
-                    "SELECT COUNT(*) FROM `ai_models` WHERE `modalities` LIKE '%语音%'", Integer.class);
+            String capBase = "SELECT COUNT(*) FROM `ai_models` m LEFT JOIN `model_vendors` v ON m.vendor_id = v.id " +
+                    "WHERE 1=1 " + PUBLIC_VISIBILITY_FILTER + " AND m.modalities LIKE ?";
+            Integer textReasoning = jdbcTemplate.queryForObject(capBase, Integer.class, "%文本%");
+            Integer code = jdbcTemplate.queryForObject(capBase, Integer.class, "%代码%");
+            Integer vision = jdbcTemplate.queryForObject(capBase, Integer.class, "%视觉%");
+            Integer audio = jdbcTemplate.queryForObject(capBase, Integer.class, "%语音%");
             capCounts.put("textReasoning", textReasoning != null ? textReasoning : 0);
             capCounts.put("code", code != null ? code : 0);
             capCounts.put("vision", vision != null ? vision : 0);
@@ -493,13 +679,21 @@ public class AiModelRepository {
             }
         }
 
-        // 2. 写入已确认事件 model_events
+        // 2. 写入已确认事件 model_events (方案阶段 7: 自动推断 9 大分类与论文提取)
         String dateSuffix = (releaseDate != null ? releaseDate.replace("-", "") : "20260101");
         String dedupKey = modelKey + "-" + (eventType != null ? eventType.toLowerCase() : "release") + "-" + dateSuffix;
-        String insertEventSql = "INSERT INTO `model_events` (`model_id`, `vendor_id`, `event_type`, `stage`, `summary`, `release_date`, `date_precision`, `first_seen_at`, `review_status`, `dedup_key`, `created_at`) " +
-                "VALUES (?, ?, ?, ?, ?, ?, 'EXACT', NOW(3), 'CONFIRMED', ?, NOW(3)) " +
-                "ON DUPLICATE KEY UPDATE `summary` = VALUES(`summary`), `review_status` = 'CONFIRMED'";
-        jdbcTemplate.update(insertEventSql, modelId, vendorId, eventType, stage, summary, releaseDate, dedupKey);
+
+        String category = inferCategory(candidate.getRawTitle(), summary);
+        String arxivId = extractArxivId(candidate.getRawTitle() + " " + summary + " " + candidate.getEvidenceUrl());
+        String paperUrl = arxivId != null ? ("https://arxiv.org/abs/" + arxivId) : null;
+        String technicalReportUrl = (candidate.getEvidenceUrl() != null && candidate.getEvidenceUrl().toLowerCase().endsWith(".pdf"))
+                ? candidate.getEvidenceUrl() : null;
+
+        String insertEventSql = "INSERT INTO `model_events` " +
+                "(`model_id`, `vendor_id`, `event_type`, `stage`, `summary`, `release_date`, `date_precision`, `first_seen_at`, `review_status`, `dedup_key`, `category`, `arxiv_id`, `paper_url`, `technical_report_url`, `created_at`) " +
+                "VALUES (?, ?, ?, ?, ?, ?, 'EXACT', NOW(3), 'CONFIRMED', ?, ?, ?, ?, ?, NOW(3)) " +
+                "ON DUPLICATE KEY UPDATE `summary` = VALUES(`summary`), `category` = VALUES(`category`), `arxiv_id` = VALUES(`arxiv_id`), `paper_url` = VALUES(`paper_url`), `technical_report_url` = VALUES(`technical_report_url`), `review_status` = 'CONFIRMED'";
+        jdbcTemplate.update(insertEventSql, modelId, vendorId, eventType, stage, summary, releaseDate, dedupKey, category, arxivId, paperUrl, technicalReportUrl);
         Long eventId = jdbcTemplate.queryForObject("SELECT id FROM `model_events` WHERE `dedup_key` = ?", Long.class, dedupKey);
 
         // 3. 关联官方存证凭据 event_evidence (闭合证据链，关联真实 source_item_id)
@@ -527,13 +721,19 @@ public class AiModelRepository {
         return eventId;
     }
 
-    // 7. 管理端信源监控与管控
+    // 7. 管理端信源监控与管控 (追加 36/37: 端到端监测台账，包含双轨计数与最新有效发布日)
     public List<Map<String, Object>> findAllSourcesForAdmin() {
-        String sql = "SELECT s.id, s.vendor_id, v.name as vendor_name, v.brand_color, s.source_url, s.source_type, " +
-                "s.is_active, s.last_success_time, s.failure_count, s.last_error, s.created_at " +
+        String sql = "SELECT s.id, s.vendor_id, v.name as vendor_name, v.slug as vendor_slug, v.brand_color, s.source_url, s.source_type, " +
+                "s.is_active, COALESCE(s.content_status, 'HEALTHY') as content_status, s.last_parsed_count, " +
+                "DATE_FORMAT(s.latest_item_published_at, '%Y-%m-%d') as latest_item_published_at, " +
+                "DATE_FORMAT(s.last_success_time, '%Y-%m-%d %H:%i:%s') as last_success_time, " +
+                "s.failure_count, s.last_error, s.created_at, " +
+                "(SELECT COUNT(1) FROM `source_items` si WHERE si.source_id = s.id AND si.is_static_resource = 0) as total_items_count, " +
+                "(SELECT COUNT(1) FROM `source_items` si WHERE si.source_id = s.id AND si.is_static_resource = 0 AND si.process_status = 'PENDING') as pending_items_count, " +
+                "(SELECT COUNT(DISTINCT ev.event_id) FROM `event_evidence` ev JOIN `source_items` si ON ev.source_item_id = si.id WHERE si.source_id = s.id) as confirmed_events_count " +
                 "FROM `model_sources` s " +
                 "JOIN `model_vendors` v ON s.vendor_id = v.id " +
-                "ORDER BY s.id ASC";
+                "ORDER BY s.is_active DESC, s.id ASC";
         return jdbcTemplate.queryForList(sql);
     }
 
@@ -681,12 +881,14 @@ public class AiModelRepository {
                 "si.title, ms.source_url, si.canonical_url, si.summary_zh, " +
                 "DATE_FORMAT(si.published_at, '%Y-%m-%d') as published_date, " +
                 "DATE_FORMAT(si.first_seen_at, '%Y-%m-%d %H:%i:%s') as seen_time, " +
+                "DATE(si.first_seen_at) as seen_date, " +
                 "si.process_status, " +
                 "(SELECT COUNT(1) FROM `model_discovery_candidates` mdc WHERE mdc.evidence_url = si.canonical_url) as has_candidate " +
                 "FROM `source_items` si " +
                 "LEFT JOIN `model_sources` ms ON si.source_id = ms.id " +
                 "LEFT JOIN `model_vendors` v ON COALESCE(si.vendor_id, ms.vendor_id) = v.id " +
-                "WHERE 1=1 ");
+                // 静态资源页排除与前台发布日期门禁 (追加 17/38/39): 条款/招聘/隐私/导航等不入公开动态流，且前台动态必须具备有效发布日期
+                "WHERE si.is_static_resource = 0 AND si.published_at IS NOT NULL ");
         List<Object> params = new ArrayList<>();
         if (month != null && !month.isBlank()) {
             sql.append("AND DATE_FORMAT(si.published_at, '%Y-%m') = ? ");
@@ -716,7 +918,10 @@ public class AiModelRepository {
                 sql.append("AND (LOWER(CONCAT(si.title, ' ', si.canonical_url)) REGEXP 'canvas|workspace|search|voice|vision|agent|功能|体验|搜索|网页版|chat') ");
             }
         }
-        sql.append("ORDER BY (CASE WHEN si.published_at IS NOT NULL THEN 0 ELSE 1 END) ASC, si.published_at DESC, si.id DESC LIMIT ? OFFSET ?");
+        // 追加 28: 发布日与首次抓取日同日 (回填/待核实) 的条目降级到列表后部,
+        // 不再冒充"最新发布"占据前列; 有可信日期的条目按日期倒序在前
+        sql.append("ORDER BY (CASE WHEN si.published_at IS NULL OR DATE(si.published_at) = DATE(si.first_seen_at) THEN 1 ELSE 0 END) ASC, ")
+           .append("si.published_at DESC, si.id DESC LIMIT ? OFFSET ?");
         params.add(size);
         params.add((page - 1) * size);
 
@@ -733,8 +938,18 @@ public class AiModelRepository {
             dto.setPublishedAt(rs.getString("published_date"));
             dto.setFirstSeenAt(rs.getString("seen_time"));
             dto.setProcessStatus(rs.getString("process_status"));
-            dto.setCandidateGenerated(rs.getInt("has_candidate") > 0);
-            dto.setSummaryZh(rs.getString("summary_zh"));
+            // 日期待核实 (追加 17): V22 曾把空 published_at 用首次抓取日回填,
+            // 发布日与首次抓取日同日时不能当作官方发布日期直接展示
+            String publishedDate = rs.getString("published_date");
+            String seenDate = rs.getString("seen_date");
+            dto.setDateUncertain(publishedDate != null && publishedDate.equals(seenDate));
+            String sumZh = rs.getString("summary_zh");
+            // 摘要兜底修正 (追加 17): 空摘要与 V20 统一模板句一律显示"暂无摘要",
+            // 不把"抓到了一个链接"包装成已核实的官方说明
+            if (sumZh == null || sumZh.isBlank() || sumZh.startsWith("官方原厂发布重要动态公告")) {
+                sumZh = "暂无摘要";
+            }
+            dto.setSummaryZh(sumZh);
 
             String cat = classifyCategory(dto.getTitle(), dto.getCanonicalUrl());
             dto.setCategory(cat);
@@ -752,7 +967,7 @@ public class AiModelRepository {
         StringBuilder sql = new StringBuilder("SELECT COUNT(1) FROM `source_items` si " +
                 "LEFT JOIN `model_sources` ms ON si.source_id = ms.id " +
                 "LEFT JOIN `model_vendors` v ON COALESCE(si.vendor_id, ms.vendor_id) = v.id " +
-                "WHERE 1=1 ");
+                "WHERE si.is_static_resource = 0 AND si.published_at IS NOT NULL ");
         List<Object> params = new ArrayList<>();
         if (month != null && !month.isBlank()) {
             sql.append("AND DATE_FORMAT(si.published_at, '%Y-%m') = ? ");
@@ -902,5 +1117,110 @@ public class AiModelRepository {
                 "GROUP BY v_id, cov_month " +
                 "HAVING v_id IS NOT NULL";
         return jdbcTemplate.queryForList(sql, year);
+    }
+
+    // 目录同步执行记录与审计
+    public List<Map<String, Object>> listCatalogSyncRuns(int limit) {
+        String sql = "SELECT r.id, r.source_id, s.source_key, s.name as source_name, r.status, r.fetched_count, " +
+                "r.matched_count, r.created_draft_count, r.error_message, r.blocked_reason, r.sync_report_json, " +
+                "DATE_FORMAT(r.started_at, '%Y-%m-%d %H:%i:%s') as started_at, " +
+                "DATE_FORMAT(r.finished_at, '%Y-%m-%d %H:%i:%s') as finished_at " +
+                "FROM `catalog_sync_runs` r " +
+                "LEFT JOIN `catalog_sources` s ON r.source_id = s.id " +
+                "ORDER BY r.id DESC LIMIT ?";
+        return jdbcTemplate.queryForList(sql, limit);
+    }
+
+    // 冲突队列查询
+    public List<Map<String, Object>> listCatalogConflicts(String status, int limit) {
+        String sql = "SELECT c.id, c.model_id, m.display_name as model_name, m.model_key, c.field_key, " +
+                "c.current_value, c.incoming_value, c.reason, c.status, s.name as source_name, " +
+                "DATE_FORMAT(c.created_at, '%Y-%m-%d %H:%i:%s') as created_at " +
+                "FROM `catalog_conflicts` c " +
+                "LEFT JOIN `ai_models` m ON c.model_id = m.id " +
+                "LEFT JOIN `catalog_sources` s ON c.incoming_source_id = s.id " +
+                (status != null && !status.isBlank() ? "WHERE c.status = ? " : "") +
+                "ORDER BY c.id DESC LIMIT ?";
+        if (status != null && !status.isBlank()) {
+            return jdbcTemplate.queryForList(sql, status, limit);
+        }
+        return jdbcTemplate.queryForList(sql, limit);
+    }
+
+    // 冲突处置
+    public void resolveCatalogConflict(Long conflictId, String decision, String decidedBy) {
+        Map<String, Object> conflict = jdbcTemplate.queryForMap("SELECT * FROM `catalog_conflicts` WHERE id = ?", conflictId);
+        Long modelId = conflict.get("model_id") != null ? ((Number) conflict.get("model_id")).longValue() : null;
+        String fieldKey = (String) conflict.get("field_key");
+        String incomingVal = (String) conflict.get("incoming_value");
+
+        if ("TAKE".equalsIgnoreCase(decision) && modelId != null && incomingVal != null) {
+            if ("official_release_date".equals(fieldKey)) {
+                jdbcTemplate.update("UPDATE `ai_models` SET `official_release_date` = ? WHERE id = ?", incomingVal, modelId);
+            }
+        }
+        String newStatus = "TAKE".equalsIgnoreCase(decision) ? "RESOLVED_TAKE" : "RESOLVED_KEEP";
+        jdbcTemplate.update("UPDATE `catalog_conflicts` SET `status` = ?, `decided_by` = ?, `decided_at` = NOW(3) WHERE id = ?",
+                newStatus, decidedBy, conflictId);
+    }
+
+    /**
+     * 目录计数口径助手 (追加 16/17): 供 /catalog/report 分列统计使用
+     */
+    public long countBySql(String sql) {
+        Long v = jdbcTemplate.queryForObject(sql, Long.class);
+        return v != null ? v : 0L;
+    }
+
+    /**
+     * 同名重复分组样本 (追加 20 只读归并报表): 供管理端逐组核对, 不做自动合并
+     */
+    public List<Map<String, Object>> findDuplicateGroupSamples(int limit) {
+        String sql = "SELECT v.name AS vendor_name, MIN(m.display_name) AS display_name, COUNT(*) AS cnt, " +
+                "GROUP_CONCAT(m.id ORDER BY m.id) AS model_ids " +
+                "FROM `ai_models` m LEFT JOIN `model_vendors` v ON m.vendor_id = v.id " +
+                "WHERE m.display_name IS NOT NULL AND m.display_name <> '' " +
+                "GROUP BY m.vendor_id, LOWER(m.display_name) HAVING COUNT(*) > 1 " +
+                "ORDER BY cnt DESC, vendor_name LIMIT ?";
+        return jdbcTemplate.queryForList(sql, limit);
+    }
+
+    public static String inferCategory(String title, String summary) {
+        String text = ((title != null ? title : "") + " " + (summary != null ? summary : "")).toLowerCase();
+        if (text.contains("reason") || text.contains("thought") || text.contains("thinking") || text.contains("推理") || text.contains("思维链") || text.contains("r1") || text.contains("o1") || text.contains("o3")) {
+            return "REASONING_BREAKTHROUGH";
+        }
+        if (text.contains("open source") || text.contains("weights") || text.contains("开源") || text.contains("开放权重") || text.contains("community")) {
+            return "OPEN_WEIGHTS";
+        }
+        if (text.contains("price") || text.contains("pricing") || text.contains("cost") || text.contains("降价") || text.contains("费率") || text.contains("tokens")) {
+            return "API_PRICING";
+        }
+        if (text.contains("context") || text.contains("1m") || text.contains("2m") || text.contains("128k") || text.contains("窗口") || text.contains("长上下文")) {
+            return "CONTEXT_EXPANSION";
+        }
+        if (text.contains("vision") || text.contains("audio") || text.contains("video") || text.contains("multimodal") || text.contains("多模态") || text.contains("视觉") || text.contains("语音") || text.contains("视频")) {
+            return "MULTIMODAL";
+        }
+        if (text.contains("agent") || text.contains("function call") || text.contains("tool") || text.contains("智能体") || text.contains("工作流")) {
+            return "AGENTIC";
+        }
+        if (text.contains("sdk") || text.contains("api") || text.contains("cli") || text.contains("framework") || text.contains("开发者") || text.contains("工具")) {
+            return "DEV_TOOLS";
+        }
+        if (text.contains("safety") || text.contains("alignment") || text.contains("eval") || text.contains("policy") || text.contains("安全") || text.contains("对齐") || text.contains("合规")) {
+            return "POLICY_SAFETY";
+        }
+        return "FLAGSHIP_RELEASE";
+    }
+
+    public static String extractArxivId(String text) {
+        if (text == null || text.isBlank()) return null;
+        java.util.regex.Pattern p = java.util.regex.Pattern.compile("(?i)(?:arxiv\\.org/(?:abs|pdf)/|arxiv:?)([0-9]{4}\\.[0-9]{4,5})");
+        java.util.regex.Matcher m = p.matcher(text);
+        if (m.find()) {
+            return m.group(1);
+        }
+        return null;
     }
 }

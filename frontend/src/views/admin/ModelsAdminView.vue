@@ -173,6 +173,8 @@ function handleTabChange(tab) {
   } else if (tab === 'backfills') {
     loadBackfills()
     loadCoverageAudits()
+  } else if (tab === 'catalog') {
+    loadCatalogData()
   }
 }
 
@@ -287,6 +289,61 @@ async function handleTriggerCrawl() {
   }
 }
 
+// ========== 目录聚合同步 (阶段 0 / 追加 17 止血) ==========
+const catalogLoading = ref(false)
+const catalogSyncing = ref(false)
+const catalogRuns = ref([])
+const catalogReport = ref(null)
+
+async function loadCatalogData() {
+  catalogLoading.value = true
+  try {
+    const [runs, report] = await Promise.all([
+      aiApi.getCatalogRuns(15),
+      aiApi.getCatalogReport()
+    ])
+    catalogRuns.value = runs || []
+    catalogReport.value = report || null
+  } catch (e) {
+    console.error('目录同步数据加载失败', e)
+  } finally {
+    catalogLoading.value = false
+  }
+}
+
+async function handleCatalogSync(sourceKey = 'all') {
+  if (catalogSyncing.value) return
+  catalogSyncing.value = true
+  try {
+    const reps = await aiApi.triggerCatalogSync(sourceKey)
+    const list = Array.isArray(reps) ? reps : [reps]
+    const lines = list.map(r =>
+      `${r.sourceKey}: 拉取 ${r.fetchedCount} · 归并 ${r.matchedCount} · 自动公开 ${r.autoPublishedCount} · 闸门 ${r.passedGates ? '✅ 通过' : '⛔ 阻断(' + (r.blockedReason || '') + ')'}`
+    )
+    alert('目录同步完成:\n' + lines.join('\n'))
+    loadCatalogData()
+  } catch (e) {
+    alert('目录同步触发失败: ' + e.message)
+  } finally {
+    catalogSyncing.value = false
+  }
+}
+
+const reportMetricDefs = [
+  { key: 'endpointRows', label: '端点镜像行' },
+  { key: 'canonicalModels', label: '库内模型总数' },
+  { key: 'publishedModels', label: '已公开模型' },
+  { key: 'pendingReviewModels', label: '待审模型' },
+  { key: 'autoPublishedModels', label: '自动公开模型' },
+  { key: 'vendorsTotal', label: '厂商总数' },
+  { key: 'vendorsAutoRegistered', label: '自动注册厂商' },
+  { key: 'vendorsNoOfficialSource', label: '无官方信源厂商' },
+  { key: 'vendorsPending', label: '待审厂商' },
+  { key: 'duplicateModelCount', label: '同名重复模型' },
+  { key: 'staticResourceItems', label: '静态资源页(已排除)' },
+  { key: 'officialUpdatesVisible', label: '公开动态条数' },
+]
+
 function handleLogout() {
   if (confirm('确定要退出管理员登录吗？')) {
     authApi.logout()
@@ -397,12 +454,19 @@ onMounted(() => {
           >
             🛰️ 官方信源状态 ({{ sources.length || stats.activeSources }})
           </button>
-          <button 
-            class="tab-pill-btn" 
+          <button
+            class="tab-pill-btn"
             :class="{ active: currentTab === 'backfills' }"
             @click="handleTabChange('backfills')"
           >
             ⏳ 2026 历史回填
+          </button>
+          <button
+            class="tab-pill-btn"
+            :class="{ active: currentTab === 'catalog' }"
+            @click="handleTabChange('catalog')"
+          >
+            🗂️ 目录聚合同步
           </button>
         </div>
 
@@ -557,8 +621,10 @@ onMounted(() => {
                   <th>ID</th>
                   <th>所属厂商</th>
                   <th>信源 URL 与类型</th>
-                  <th>状态</th>
-                  <th>最近成功</th>
+                  <th>健康与解析</th>
+                  <th>最新发布</th>
+                  <th>捕获 / 待审 / 确认</th>
+                  <th>最近巡检成功</th>
                   <th>异常排查</th>
                   <th>操作</th>
                 </tr>
@@ -580,8 +646,31 @@ onMounted(() => {
                     </div>
                   </td>
                   <td>
-                    <span class="health-pill" :class="{ 'healthy': s.failure_count === 0, 'faulty': s.failure_count > 0 }">
-                      {{ s.failure_count === 0 ? '● 正常' : '▲ 失败 ' + s.failure_count + '次' }}
+                    <span 
+                      class="health-pill" 
+                      :class="{ 
+                        'healthy': s.failure_count === 0 && (!s.content_status || s.content_status === 'HEALTHY'), 
+                        'healthy-neutral': s.content_status === 'PARSE_EMPTY',
+                        'faulty': s.failure_count > 0 || s.content_status === 'ERROR'
+                      }"
+                    >
+                      {{ 
+                        s.failure_count > 0 ? '▲ 失败 ' + s.failure_count + '次' : 
+                        (s.content_status === 'PARSE_EMPTY' ? '○ 解析为空' : '● 正常解析') 
+                      }}
+                    </span>
+                  </td>
+                  <td>
+                    <span style="font-family: monospace; font-size: 12px; color: #103443; font-weight: 600;">
+                      {{ s.latest_item_published_at || '—' }}
+                    </span>
+                  </td>
+                  <td>
+                    <span style="font-size: 12px;">
+                      <strong>{{ s.total_items_count != null ? s.total_items_count : 0 }}</strong> 条
+                      <span style="color: #59717a; font-size: 11px;">
+                        (待审 {{ s.pending_items_count != null ? s.pending_items_count : 0 }} / 确认 {{ s.confirmed_events_count != null ? s.confirmed_events_count : 0 }})
+                      </span>
                     </span>
                   </td>
                   <td class="time-col">
@@ -721,9 +810,18 @@ onMounted(() => {
                     <td>
                       <span 
                         class="health-pill" 
-                        :class="{ 'healthy': cov.status === 'FULL', 'faulty': cov.status !== 'FULL' }"
+                        :class="{ 
+                          'healthy': cov.status === 'VERIFIED_COVERED' || cov.status === 'FULL', 
+                          'healthy-neutral': cov.status === 'VERIFIED_EMPTY',
+                          'faulty': cov.status === 'INCOMPLETE' || cov.status === 'PARTIAL',
+                          'muted': cov.status === 'UNVERIFIED' || cov.status === 'GAP'
+                        }"
                       >
-                        {{ cov.status === 'FULL' ? '● 已扫完 (FULL)' : '▲ 部分覆盖 (PARTIAL)' }}
+                        {{ 
+                          (cov.status === 'VERIFIED_COVERED' || cov.status === 'FULL') ? '● 已核验覆盖' : 
+                          (cov.status === 'VERIFIED_EMPTY' ? '○ 已核查无更新' : 
+                          (cov.status === 'INCOMPLETE' || cov.status === 'PARTIAL' ? '▲ 存在覆盖缺口' : '— 待深入核验'))
+                        }}
                       </span>
                     </td>
                     <td>{{ cov.earliestItemDate || '—' }}</td>
@@ -735,6 +833,87 @@ onMounted(() => {
                 </tbody>
               </table>
             </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- 选项卡 4: 目录聚合同步 (阶段 0 / 追加 17 止血) -->
+      <section v-if="currentTab === 'catalog'" class="panel-section">
+        <div class="sources-card">
+          <div class="sources-header">
+            <div>
+              <h3>目录聚合同步与计数口径报告</h3>
+              <p class="section-desc">
+                按《模型数据管线改进方案》阶段 0~3 执行: 暂存 → 发布事务 → 闸门 → 原子公开。
+                自动公开建卡默认关闭 (追加 17 止血), 未匹配候选保持待审; 计数口径按追加 16 分列, 端点/托管渠道不计入厂商与模型数。
+              </p>
+            </div>
+            <div style="display: flex; gap: 10px;">
+              <button class="crawl-trigger-btn" :disabled="catalogSyncing" @click="handleCatalogSync('models_dev')">
+                <span>{{ catalogSyncing ? '⏳ 同步中...' : '▶ 同步 models_dev' }}</span>
+              </button>
+              <button class="crawl-trigger-btn" :disabled="catalogSyncing" @click="handleCatalogSync('all')">
+                <span>{{ catalogSyncing ? '⏳ 同步中...' : '🚀 同步全部源' }}</span>
+              </button>
+            </div>
+          </div>
+
+          <!-- 计数口径报告 -->
+          <div v-if="catalogReport" class="catalog-report-grid">
+            <div v-for="m in reportMetricDefs" :key="m.key" class="report-metric-card">
+              <div class="metric-num">{{ catalogReport[m.key] ?? '—' }}</div>
+              <div class="metric-lbl">{{ m.label }}</div>
+            </div>
+          </div>
+
+          <!-- 同步运行审计 -->
+          <div v-if="catalogLoading" class="loading-state">
+            <div class="spinner"></div>
+            <p>正在读取目录同步运行记录...</p>
+          </div>
+
+          <div v-else-if="catalogRuns.length === 0" class="empty-state">
+            <span class="empty-icon">🗂️</span>
+            <h4>暂无目录同步运行记录</h4>
+            <p>点击上方按钮手动触发, 或等待每日 04:00 定时同步。</p>
+          </div>
+
+          <div v-else class="table-responsive" style="margin-top: 18px;">
+            <table class="sources-table">
+              <thead>
+                <tr>
+                  <th>运行 ID</th>
+                  <th>目录源</th>
+                  <th>状态</th>
+                  <th>拉取</th>
+                  <th>归并</th>
+                  <th>待审/草稿</th>
+                  <th>闸门原因</th>
+                  <th>开始时间</th>
+                  <th>结束时间</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="run in catalogRuns" :key="run.id">
+                  <td>#{{ run.id }}</td>
+                  <td>{{ run.source_name || run.source_key || run.source_id }}</td>
+                  <td>
+                    <span
+                      class="health-pill"
+                      :class="{ healthy: run.status === 'SUCCESS', faulty: run.status !== 'SUCCESS' }"
+                    >
+                      {{ run.status === 'SUCCESS' ? '● 成功' : (run.status === 'FAILED_BLOCKED' ? '⛔ 闸门阻断' : (run.status === 'RUNNING' ? '⏳ 运行中' : '✕ 失败')) }}
+                    </span>
+                  </td>
+                  <td>{{ run.fetched_count ?? '—' }}</td>
+                  <td>{{ run.matched_count ?? '—' }}</td>
+                  <td>{{ run.created_draft_count ?? '—' }}</td>
+                  <td class="error-col"><span :title="run.blocked_reason || run.error_message">{{ run.blocked_reason || run.error_message || '—' }}</span></td>
+                  <td>{{ run.started_at || '—' }}</td>
+                  <td>{{ run.finished_at || '—' }}</td>
+                </tr>
+              </tbody>
+            </table>
           </div>
         </div>
       </section>
@@ -1316,7 +1495,9 @@ onMounted(() => {
   font-weight: 700;
 }
 .health-pill.healthy { color: #059669; }
-.health-pill.faulty { color: #DC2626; }
+.health-pill.healthy-neutral { color: #0284c7; }
+.health-pill.faulty { color: #d97706; }
+.health-pill.muted { color: #94a3b8; }
 .error-col {
   max-width: 280px;
 }
@@ -1506,6 +1687,32 @@ onMounted(() => {
   border-radius: 8px;
   margin-bottom: 24px;
 }
+
+/* 目录聚合同步: 计数口径报告网格 (阶段 0 / 追加 17) */
+.catalog-report-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 12px;
+  margin-bottom: 24px;
+}
+.report-metric-card {
+  background: rgba(16, 52, 67, 0.03);
+  border: 1px solid rgba(16, 52, 67, 0.08);
+  border-radius: 8px;
+  padding: 12px 14px;
+}
+.report-metric-card .metric-num {
+  font-size: 20px;
+  font-weight: 700;
+  font-family: Consolas, "Courier New", monospace;
+  color: #103443;
+}
+.report-metric-card .metric-lbl {
+  font-size: 12px;
+  color: rgba(16, 52, 67, 0.65);
+  margin-top: 2px;
+}
+
 .config-col {
   display: flex;
   flex-direction: column;

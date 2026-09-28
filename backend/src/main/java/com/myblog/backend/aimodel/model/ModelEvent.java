@@ -20,6 +20,13 @@ public class ModelEvent {
     private String dedupKey;
     private String createdAt;
 
+    // 方案阶段 7: 9大分类与论文元数据
+    private String category;
+    private String arxivId;
+    private String paperUrl;
+    private String technicalReportUrl;
+    private String keyBreakthrough;
+
     // 关联显示
     private String modelName;
     private String modelKey;
@@ -95,4 +102,19 @@ public class ModelEvent {
 
     public List<EventEvidence> getEvidences() { return evidences; }
     public void setEvidences(List<EventEvidence> evidences) { this.evidences = evidences != null ? evidences : new ArrayList<>(); }
+
+    public String getCategory() { return category; }
+    public void setCategory(String category) { this.category = category; }
+
+    public String getArxivId() { return arxivId; }
+    public void setArxivId(String arxivId) { this.arxivId = arxivId; }
+
+    public String getPaperUrl() { return paperUrl; }
+    public void setPaperUrl(String paperUrl) { this.paperUrl = paperUrl; }
+
+    public String getTechnicalReportUrl() { return technicalReportUrl; }
+    public void setTechnicalReportUrl(String technicalReportUrl) { this.technicalReportUrl = technicalReportUrl; }
+
+    public String getKeyBreakthrough() { return keyBreakthrough; }
+    public void setKeyBreakthrough(String keyBreakthrough) { this.keyBreakthrough = keyBreakthrough; }
 }
