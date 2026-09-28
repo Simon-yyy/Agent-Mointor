@@ -1,0 +1,41 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="32" height="32">
+  <defs>
+    <linearGradient id="bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0f172a" />
+      <stop offset="100%" stop-color="#020617" />
+    </linearGradient>
+    <linearGradient id="sGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#38bdf8" />
+      <stop offset="100%" stop-color="#2563eb" />
+    </linearGradient>
+    <style>
+      .bg-rect {
+        fill: url(#bgGrad);
+        stroke: rgba(255, 255, 255, 0.15);
+        stroke-width: 1;
+      }
+      .monogram {
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "JetBrains Mono", sans-serif;
+        font-weight: 900;
+        font-size: 20px;
+        fill: url(#sGrad);
+      }
+      .dot {
+        fill: #38bdf8;
+      }
+      @media (prefers-color-scheme: dark) {
+        .bg-rect {
+          fill: #131b2e;
+          stroke: rgba(56, 189, 248, 0.4);
+          stroke-width: 1.2;
+        }
+      }
+    </style>
+  </defs>
+  <!-- 现代几何圆角外壳 -->
+  <rect class="bg-rect" x="1" y="1" width="30" height="30" rx="8" />
+  <!-- 核心字标 S -->
+  <text class="monogram" x="13" y="23" text-anchor="middle">S</text>
+  <!-- 终端就绪指示点 -->
+  <circle class="dot" cx="22" cy="22" r="2.2" />
+</svg>

@@ -1,0 +1,20 @@
+# 博客项目完整开发路线
+
+> 基于当前工程现状（后端 Spring Boot 骨架 + 前端 Vue 3 三页面壳，前后端未打通）制定的落地路线。
+> 预计总工期：全职约 7~10 个工作日；业余时间约 2~3 周。
+
+---
+
+## 一、现状盘点
+
+| 模块 | 现状 | 差距 |
+|------|------|------|
+| backend | Spring Boot 骨架，仅 HelloController，`application.properties` 为空壳，可正常打包 | 无数据库、无业务模块、无统一响应/异常处理 |
+| frontend | Vue 3 + Vite + vue-router，Home/Articles/Works 三个空视图 | 无 axios、无 API 层、无组件库、页面为静态壳 |
+| tools/jdk | 便携 JDK | 可用于免安装启动，尚未利用 |
+
+**总体架构目标**：前后端分离开发、RESTful API、Markdown 内容驱动、可单 jar 合体部署。
+
+---
+
+## 二、里程碑总览

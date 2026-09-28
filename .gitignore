@@ -1,0 +1,23 @@
+# JDK 免安装环境（本地工具，不入库）
+tools/
+
+# Java / Maven 构建产物
+backend/target/
+*.class
+
+# 前端依赖与构建产物
+frontend/node_modules/
+frontend/dist/
+
+# IDE 配置
+.idea/
+*.iml
+.vscode/
+
+# 系统杂项
+Thumbs.db
+.DS_Store
+
+# 临时文件
+*.zip
+*.log

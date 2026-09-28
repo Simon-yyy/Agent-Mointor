@@ -1,0 +1,35 @@
+[
+  {
+    "id": 1,
+    "title": "极简个人全栈博客",
+    "description": "用 Spring Boot 3 + Vue 3 写的轻量个人站，去掉了臃肿的三方组件库，自适应明暗主题，本地持久化零运维负担。",
+    "coverUrl": "",
+    "demoUrl": "http://localhost:5180",
+    "githubUrl": "https://github.com/myblog/blog-system",
+    "techStack": ["Spring Boot 3", "Vue 3", "Java 21"],
+    "sortOrder": 1,
+    "createdAt": "2026-09-19 00:37:35"
+  },
+  {
+    "id": 2,
+    "title": "轻量 Markdown 在线编辑器",
+    "description": "支持实时分屏预览、代码高亮、大纲定位和本地草稿自动暂存的轻量写作小工具。",
+    "coverUrl": "",
+    "demoUrl": "http://localhost:5180/admin/articles/new",
+    "githubUrl": "https://github.com/myblog/web-markdown-editor",
+    "techStack": ["Vue 3", "Markdown"],
+    "sortOrder": 2,
+    "createdAt": "2026-09-19 00:37:35"
+  },
+  {
+    "id": 3,
+    "title": "HTTP 接口并发压测工具",
+    "description": "基于 Java 21 虚拟线程编写的简单压测脚本，用于快速摸清高并发 IO 密集型接口的吞吐量瓶颈。",
+    "coverUrl": "",
+    "demoUrl": "http://localhost:5180/works",
+    "githubUrl": "https://github.com/myblog/concurrency-dashboard",
+    "techStack": ["Java 21", "虚拟线程"],
+    "sortOrder": 3,
+    "createdAt": "2026-09-19 00:37:35"
+  }
+]
